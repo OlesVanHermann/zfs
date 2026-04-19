@@ -1,0 +1,2594 @@
+--- zfs-2.4.1/include/sys/qos_bucket.h	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/include/sys/qos_bucket.h	2026-04-14 20:39:24.049382424 +0000
+@@ -0,0 +1,142 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or https://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++#ifndef _SYS_QOS_BUCKET_H
++#define	_SYS_QOS_BUCKET_H
++
++#include <sys/zfs_context.h>
++#include <sys/list.h>
++
++#ifdef	__cplusplus
++extern "C" {
++#endif
++
++struct zio;
++struct dsl_pool;
++
++/* Idle donor: kept active for this long after last consume or property set */
++#define	QOS_DONOR_KEEP_NS	(5LL * NANOSEC)		/* 5 seconds */
++/* Surplus retain: donors keep 50% of burst = 1x rate */
++#define	QOS_SURPLUS_RETAIN	2			/* burst/2 = 1x rate */
++/* Idle threshold: tokens >= 90% of burst → donor is idle */
++#define	QOS_IDLE_NUMERATOR	9
++#define	QOS_IDLE_DENOMINATOR	10
++/* Wake thread interval */
++#define	QOS_WAKE_INTERVAL_MS	1
++
++/* QoS R/W split: I/O direction for per-direction token buckets (Q-patch10) */
++typedef enum {
++	QOS_IO_READ  = 0,
++	QOS_IO_WRITE = 1,
++} qos_io_type_t;
++
++typedef enum {
++	QOS_OK = 0,
++	QOS_THROTTLED = 1,
++	QOS_IO_TOO_LARGE = 2
++} qos_result_t;
++
++typedef struct qos_waiter {
++	list_node_t	qw_node;
++	struct zio	*qw_zio;
++	hrtime_t	qw_enqueue_time;
++} qos_waiter_t;
++
++/* QoS R/W split: per-direction token bucket (Q-patch10) */
++typedef struct qos_token_bucket {
++	int64_t		tb_iops_tokens;
++	int64_t		tb_iops_rate;		/* tokens/second */
++	int64_t		tb_iops_burst;		/* max = 2x rate */
++	hrtime_t	tb_iops_last_fill;
++	int64_t		tb_bw_tokens;
++	int64_t		tb_bw_rate;		/* bytes/second */
++	int64_t		tb_bw_burst;
++	hrtime_t	tb_bw_last_fill;
++	/* Stats (atomic writes under qb_lock) */
++	uint64_t	tb_stat_total_ios;
++	uint64_t	tb_stat_total_bytes;
++	uint64_t	tb_stat_throttle_count;
++	uint64_t	tb_stat_throttle_ns_total;
++	/* Boost tokens */
++	int64_t		tb_boost_bw_tokens;
++	int64_t		tb_boost_iops_tokens;
++	int64_t		tb_boost_bw_cap;
++	int64_t		tb_boost_iops_cap;
++	/* Snapshot: written under qb_lock in Pass 1, read locklessly in Pass 2 */
++	int64_t		tb_snap_bw_rate;
++	int64_t		tb_snap_iops_rate;
++} qos_token_bucket_t;
++
++typedef struct qos_bucket {
++	kmutex_t		qb_lock;
++	kcondvar_t		qb_read_cv;	/* wakes readers waiting for tokens */
++	qos_token_bucket_t	qb_read;	/* R/W split (Q-patch10) */
++	qos_token_bucket_t	qb_write;
++	/* IO size limit */
++	uint32_t		qb_io_size_max;		/* 0 = no limit */
++	/* Wait queue (ZIO waiters — legacy, mostly empty after O-patch09) */
++	list_t			qb_waiters;
++	uint32_t		qb_waiter_count;
++	/* Global active list link */
++	list_node_t		qb_active_node;
++	boolean_t		qb_on_active_list;
++	hrtime_t		qb_last_consume_time;
++	/* Shared rejected-size counter */
++	uint64_t		qb_stat_rejected_size;
++	/* State */
++	boolean_t		qb_enabled;
++	/* QoS Boost: shared fields */
++	uint32_t		qb_boost_factor;
++	boolean_t		qb_boost_pool;
++	boolean_t		qb_count_arc_hits;
++	struct dsl_pool		*qb_pool;
++	/* Snapshot: boost_factor written under qb_lock in Pass 1 */
++	uint32_t		qb_snap_boost_factor;
++} qos_bucket_t;
++
++void qos_bucket_init(qos_bucket_t *bucket);
++void qos_bucket_fini(qos_bucket_t *bucket);
++void qos_bucket_configure_split(qos_bucket_t *bucket,
++    int64_t iops_rate_read, int64_t bw_rate_read,
++    int64_t iops_rate_write, int64_t bw_rate_write,
++    uint32_t io_size_max);
++void qos_bucket_enable(qos_bucket_t *bucket);
++void qos_bucket_disable(qos_bucket_t *bucket);
++qos_result_t qos_bucket_try_consume(qos_bucket_t *bucket,
++    qos_io_type_t type, uint64_t io_size);
++void qos_bucket_refund(qos_bucket_t *bucket, uint64_t bytes);
++void qos_bucket_wait_consume(qos_bucket_t *bucket,
++    qos_io_type_t type, uint64_t io_size);
++void qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
++    uint64_t *total_bytes, uint64_t *throttle_count,
++    uint64_t *throttle_ns, uint64_t *rejected_size);
++void qos_system_init(void);
++void qos_system_fini(void);
++
++/* QoS Boost: global pool tracking (patch08) */
++extern kmutex_t qos_active_pools_lock;
++extern list_t qos_active_pools;
++
++#ifdef	__cplusplus
++}
++#endif
++
++#endif /* _SYS_QOS_BUCKET_H */
+--- zfs-2.4.1/include/sys/zio.h	2026-02-24 20:50:55.802270034 +0000
++++ zfs-2.4.1-qos/include/sys/zio.h	2026-04-14 20:39:24.049382424 +0000
+@@ -47,6 +47,8 @@
+ extern "C" {
+ #endif
+ 
++struct dsl_dataset;
++
+ /*
+  * Embedded checksum
+  */
+@@ -485,6 +487,13 @@
+ 	uint8_t		io_state[ZIO_WAIT_TYPES];
+ 	uint64_t	io_txg;
+ 	spa_t		*io_spa;
++	/*
++	 * QoS: dataset owning this I/O. Write-once before zio_nowait().
++	 * NULL for internal I/Os (scrub, resilver, free). Lifetime:
++	 * the dataset is held open for the duration of the I/O, either
++	 * by the objset (dmu_sync) or by the calling thread (dmu_send).
++	 */
++	struct dsl_dataset *io_dataset;
+ 	blkptr_t	*io_bp;
+ 	blkptr_t	*io_bp_override;
+ 	blkptr_t	io_bp_copy;
+@@ -547,6 +556,7 @@
+ 	void		*io_executor;
+ 	void		*io_waiter;
+ 	void		*io_bio;
++	struct qos_waiter *io_qos_waiter;  /* QoS: non-NULL if queued in wait queue */
+ 	kmutex_t	io_lock;
+ 	kcondvar_t	io_cv;
+ 	int		io_allocator;
+@@ -633,6 +643,7 @@
+ extern int zio_wait(zio_t *zio);
+ extern void zio_nowait(zio_t *zio);
+ extern void zio_execute(void *zio);
++extern void zio_async_dispatch(zio_t *zio);
+ extern void zio_interrupt(void *zio);
+ extern void zio_delay_init(zio_t *zio);
+ extern void zio_delay_interrupt(zio_t *zio);
+--- zfs-2.4.1/include/sys/dsl_dataset.h	2026-02-24 20:50:55.792270069 +0000
++++ zfs-2.4.1-qos/include/sys/dsl_dataset.h	2026-04-14 20:39:24.049382424 +0000
+@@ -40,6 +40,7 @@
+ #include <sys/zfs_refcount.h>
+ #include <sys/rrwlock.h>
+ #include <sys/dsl_crypt.h>
++#include <sys/qos_bucket.h>
+ #include <zfeature_common.h>
+ 
+ #ifdef	__cplusplus
+@@ -52,6 +53,7 @@
+ struct dsl_crypto_params;
+ struct dsl_key_mapping;
+ struct zfs_bookmark_phys;
++struct qos_kstat;
+ 
+ #define	DS_FLAG_INCONSISTENT	(1ULL<<0)
+ #define	DS_IS_INCONSISTENT(ds)	\
+@@ -266,6 +268,15 @@
+ 	 */
+ 	void *ds_feature_activation[SPA_FEATURES];
+ 
++	/* QoS: per-dataset I/O rate limiting bucket */
++	qos_bucket_t ds_qos;
++	struct qos_kstat *ds_qos_kstat;	/* NULL = no kstat exported */
++	/* QoS: per-dataset dirty data quota (F-patch05) */
++	uint64_t ds_dirty_quota;	/* 0 = unlimited (no QoS BW) */
++	uint64_t ds_dirty_bytes;	/* current dirty bytes (atomic) */
++	/* QoS: bytes currently in L1ARC for this dataset (G-patch06) */
++	uint64_t ds_arc_bytes;		/* atomic; no lock needed */
++
+ 	/* Protected by ds_lock; keep at end of struct for better locality */
+ 	char ds_snapname[ZFS_MAX_DATASET_NAME_LEN];
+ } dsl_dataset_t;
+@@ -511,6 +522,10 @@
+ int dsl_dataset_oldest_snapshot(spa_t *spa, uint64_t head_ds, uint64_t min_txg,
+     uint64_t *oldest_dsobj);
+ 
++void qos_prop_apply(dsl_dataset_t *ds);
++void qos_kstat_create(dsl_dataset_t *ds);
++void qos_kstat_destroy(dsl_dataset_t *ds);
++
+ #ifdef ZFS_DEBUG
+ #define	dprintf_ds(ds, fmt, ...) do { \
+ 	if (zfs_flags & ZFS_DEBUG_DPRINTF) { \
+--- zfs-2.4.1/include/sys/dsl_pool.h	2026-02-24 20:50:55.792270069 +0000
++++ zfs-2.4.1-qos/include/sys/dsl_pool.h	2026-04-14 20:39:24.049382424 +0000
+@@ -117,6 +117,18 @@
+ 	kcondvar_t dp_spaceavail_cv;
+ 	uint64_t dp_dirty_pertxg[TXG_SIZE];
+ 	uint64_t dp_dirty_total;
++	/* QoS: sum of qb_bw_rate for all QoS-enabled datasets */
++	uint64_t dp_qos_total_bw;
++	/* QoS Boost: per-pool active bucket list (patch08) */
++	list_t		dp_qos_active_buckets;
++	kmutex_t	dp_qos_active_lock;
++	boolean_t	dp_qos_on_active_pools;	/* member of qos_active_pools */
++	list_node_t	dp_qos_active_node;	/* node in qos_active_pools */
++	/* QoS Boost: persistent surplus pool (fix v3) */
++	int64_t		dp_qos_surplus_bw_read;
++	int64_t		dp_qos_surplus_bw_write;
++	int64_t		dp_qos_surplus_iops_read;
++	int64_t		dp_qos_surplus_iops_write;
+ 	uint64_t dp_long_free_dirty_pertxg[TXG_SIZE];
+ 	uint64_t dp_mos_used_delta;
+ 	uint64_t dp_mos_compressed_delta;
+@@ -180,6 +192,7 @@
+ void dsl_pool_ckpoint_diduse_space(dsl_pool_t *dp,
+     int64_t used, int64_t comp, int64_t uncomp);
+ boolean_t dsl_pool_need_dirty_delay(dsl_pool_t *dp);
++void dsl_pool_qos_dirty_update(struct dsl_dataset *ds);
+ void dsl_pool_config_enter(dsl_pool_t *dp, const void *tag);
+ void dsl_pool_config_enter_prio(dsl_pool_t *dp, const void *tag);
+ void dsl_pool_config_exit(dsl_pool_t *dp, const void *tag);
+--- zfs-2.4.1/include/sys/dmu_tx.h	2026-02-24 20:50:55.792270069 +0000
++++ zfs-2.4.1-qos/include/sys/dmu_tx.h	2026-04-14 20:39:24.049382424 +0000
+@@ -84,6 +84,10 @@
+ 	/* whether dmu_tx_wait() should return on suspend */
+ 	boolean_t tx_break_on_suspend;
+ 
++	/* QoS: DMU-level bandwidth throttle triggered */
++	boolean_t tx_qos_throttled;
++	uint64_t tx_qos_consumed_bytes; /* bytes consumed for refund on abort */
++
+ 	int tx_err;
+ };
+ 
+--- zfs-2.4.1/include/sys/arc_impl.h	2026-02-24 20:50:55.790270076 +0000
++++ zfs-2.4.1-qos/include/sys/arc_impl.h	2026-04-14 20:39:24.049382424 +0000
+@@ -41,6 +41,8 @@
+ extern "C" {
+ #endif
+ 
++struct dsl_dataset;
++
+ /*
+  * Note that buffers can be in one of 6 states:
+  *	ARC_anon	- anonymous (discussed below)
+@@ -507,6 +509,8 @@
+ 	 */
+ 	uint16_t		b_lsize;	/* immutable */
+ 	uint64_t		b_spa;		/* immutable */
++	/* QoS: per-dataset ARC accounting (Phase A) */
++	struct dsl_dataset	*b_dataset;	/* NULL = MOS or unresolved */
+ 
+ 	/* L2ARC fields. Undefined when not in L2ARC. */
+ 	l2arc_buf_hdr_t		b_l2hdr;
+--- zfs-2.4.1/include/Makefile.am	2026-02-24 20:50:55.780270111 +0000
++++ zfs-2.4.1-qos/include/Makefile.am	2026-04-14 20:39:24.049382424 +0000
+@@ -76,6 +76,7 @@
+ 	sys/objlist.h \
+ 	sys/pathname.h \
+ 	sys/qat.h \
++	sys/qos_bucket.h \
+ 	sys/range_tree.h \
+ 	sys/rrwlock.h \
+ 	sys/sa.h \
+--- zfs-2.4.1/module/zfs/qos_bucket.c	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/module/zfs/qos_bucket.c	2026-04-14 20:39:24.051382408 +0000
+@@ -0,0 +1,1048 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or https://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * QoS Token Bucket — per-dataset I/O rate limiting.
++ *
++ * Dual token bucket (IOPS + bandwidth) with lazy refill and a global
++ * wake thread that re-dispatches throttled ZIOs every 1 ms.
++ */
++
++#include <sys/qos_bucket.h>
++#include <sys/zio.h>
++#include <sys/dsl_pool.h>
++
++/*
++ * Global state for the QoS wake thread.
++ */
++/* QoS Boost: per-pool active list (patch08) — not static, extern in header */
++kmutex_t		qos_active_pools_lock;
++list_t			qos_active_pools;	/* list of dsl_pool_t */
++static kcondvar_t	qos_wake_cv;
++static boolean_t	qos_wake_exit;
++static kthread_t	*qos_wake_thr;
++
++/* Track actual wall-clock elapsed between wake cycles. */
++static hrtime_t qos_wake_last_time = 0;
++
++/* Diagnostic kstats for boost wake thread. */
++static uint64_t qos_kstat_surplus_collected  = 0;
++static uint64_t qos_kstat_surplus_distributed = 0;
++static uint64_t qos_kstat_active_buckets_seen = 0;
++static uint64_t qos_kstat_idle_donors_seen   = 0;
++static kstat_t *qos_wake_kstat = NULL;
++
++typedef struct qos_wake_kstat {
++	kstat_named_t qwk_surplus_collected;
++	kstat_named_t qwk_surplus_distributed;
++	kstat_named_t qwk_active_buckets_seen;
++	kstat_named_t qwk_idle_donors_seen;
++} qos_wake_kstat_t;
++
++static qos_wake_kstat_t qos_wake_kstat_data = {
++	{ "wake_surplus_collected",   KSTAT_DATA_UINT64 },
++	{ "wake_surplus_distributed", KSTAT_DATA_UINT64 },
++	{ "wake_active_buckets_seen", KSTAT_DATA_UINT64 },
++	{ "wake_idle_donors_seen",    KSTAT_DATA_UINT64 },
++};
++
++/*
++ * Boost weight for Pass 2 surplus distribution.
++ * weight = factor * scale / rate.  Returns 0 when rate <= 0.
++ * Used to shorten deeply-nested lines in the wake thread.
++ */
++static inline int64_t
++qos_boost_weight(uint32_t factor, int64_t scale, int64_t rate)
++{
++	if (rate <= 0)
++		return (0);
++	return ((int64_t)factor * scale / rate);
++}
++
++/*
++ * Refill tokens for one dimension.
++ * Returns surplus tokens that exceeded burst (available for boost).
++ * Called under qb_lock.
++ */
++static inline int64_t
++qos_refill_with_surplus(int64_t *tokens, int64_t rate,
++    int64_t burst, hrtime_t *last_fill)
++{
++	hrtime_t now = gethrtime();
++	hrtime_t elapsed = now - *last_fill;
++	int64_t surplus = 0;
++
++	if (elapsed > 0) {
++		int64_t sec = elapsed / NANOSEC;
++		int64_t frac = elapsed % NANOSEC;
++		int64_t frac_refill;
++		if (rate <= INT64_MAX / NANOSEC)
++			frac_refill = (frac * rate) / NANOSEC;
++		else
++			frac_refill = frac * (rate / NANOSEC);
++		int64_t refill = sec * rate + frac_refill;
++		if (refill > 0) {
++			int64_t new_val = *tokens + refill;
++			if (new_val > burst) {
++				surplus = new_val - burst;
++				new_val = burst;
++			}
++			*tokens = new_val;
++			*last_fill = now;
++		}
++	}
++	return (surplus);
++}
++
++void
++qos_bucket_init(qos_bucket_t *bucket)
++{
++	mutex_init(&bucket->qb_lock, NULL, MUTEX_DEFAULT, NULL);
++	cv_init(&bucket->qb_read_cv, NULL, CV_DEFAULT, NULL);
++	list_create(&bucket->qb_waiters, sizeof (qos_waiter_t),
++	    offsetof(qos_waiter_t, qw_node));
++
++	/* QoS R/W split: zero both sub-buckets (Q-patch10) */
++	memset(&bucket->qb_read, 0, sizeof (bucket->qb_read));
++	memset(&bucket->qb_write, 0, sizeof (bucket->qb_write));
++	bucket->qb_read.tb_iops_last_fill = gethrtime();
++	bucket->qb_read.tb_bw_last_fill = gethrtime();
++	bucket->qb_write.tb_iops_last_fill = gethrtime();
++	bucket->qb_write.tb_bw_last_fill = gethrtime();
++
++	bucket->qb_io_size_max = 0;
++	bucket->qb_waiter_count = 0;
++	bucket->qb_on_active_list = B_FALSE;
++	bucket->qb_last_consume_time = gethrtime();
++	bucket->qb_stat_rejected_size = 0;
++	bucket->qb_enabled = B_FALSE;
++
++	/* QoS Boost: defaults (patch08) */
++	bucket->qb_boost_factor = 0;
++	bucket->qb_boost_pool = B_TRUE;	/* contributes by default */
++	bucket->qb_count_arc_hits = B_TRUE;	/* count ARC hits by default */
++	bucket->qb_pool = NULL;
++	bucket->qb_snap_boost_factor = 0;
++}
++
++void
++qos_bucket_fini(qos_bucket_t *bucket)
++{
++	list_t drain;
++	qos_waiter_t *w;
++
++	list_create(&drain, sizeof (qos_waiter_t),
++	    offsetof(qos_waiter_t, qw_node));
++
++	/* Collect waiters under lock. */
++	mutex_enter(&bucket->qb_lock);
++	bucket->qb_enabled = B_FALSE;
++	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
++		list_insert_tail(&drain, w);
++	bucket->qb_waiter_count = 0;
++	mutex_exit(&bucket->qb_lock);
++
++	/* Dispatch outside lock to avoid deadlock with ZIO pipeline. */
++	while ((w = list_remove_head(&drain)) != NULL) {
++		/* ZIO_FLAG_QOS_APPROVED removed (O-patch09-qos-unify) */
++		zio_execute(w->qw_zio);
++		kmem_free(w, sizeof (qos_waiter_t));
++	}
++	list_destroy(&drain);
++
++	/* Remove from per-pool active list if present (patch08). */
++	if (bucket->qb_pool != NULL) {
++		dsl_pool_t *pool = bucket->qb_pool;
++		mutex_enter(&pool->dp_qos_active_lock);
++		if (bucket->qb_on_active_list) {
++			list_remove(&pool->dp_qos_active_buckets, bucket);
++			bucket->qb_on_active_list = B_FALSE;
++		}
++		boolean_t empty = list_is_empty(&pool->dp_qos_active_buckets);
++		mutex_exit(&pool->dp_qos_active_lock);
++
++		if (empty) {
++			mutex_enter(&qos_active_pools_lock);
++			if (pool->dp_qos_on_active_pools) {
++				list_remove(&qos_active_pools, pool);
++				pool->dp_qos_on_active_pools = B_FALSE;
++			}
++			mutex_exit(&qos_active_pools_lock);
++		}
++	}
++
++	list_destroy(&bucket->qb_waiters);
++	cv_destroy(&bucket->qb_read_cv);
++	mutex_destroy(&bucket->qb_lock);
++}
++
++/* QoS R/W split: per-direction configuration (Q-patch10) */
++void
++qos_bucket_configure_split(qos_bucket_t *bucket,
++    int64_t iops_rate_read, int64_t bw_rate_read,
++    int64_t iops_rate_write, int64_t bw_rate_write,
++    uint32_t io_size_max)
++{
++	ASSERT(iops_rate_read >= 0 && bw_rate_read >= 0);
++	ASSERT(iops_rate_write >= 0 && bw_rate_write >= 0);
++	hrtime_t now = gethrtime();
++
++	mutex_enter(&bucket->qb_lock);
++	bucket->qb_read.tb_iops_rate = iops_rate_read;
++	bucket->qb_read.tb_iops_burst = iops_rate_read * 2;
++	bucket->qb_read.tb_iops_tokens = bucket->qb_read.tb_iops_burst;
++	bucket->qb_read.tb_iops_last_fill = now;
++	bucket->qb_read.tb_bw_rate = bw_rate_read;
++	bucket->qb_read.tb_bw_burst = bw_rate_read * 2;
++	bucket->qb_read.tb_bw_tokens = bucket->qb_read.tb_bw_burst;
++	bucket->qb_read.tb_bw_last_fill = now;
++
++	bucket->qb_write.tb_iops_rate = iops_rate_write;
++	bucket->qb_write.tb_iops_burst = iops_rate_write * 2;
++	bucket->qb_write.tb_iops_tokens = bucket->qb_write.tb_iops_burst;
++	bucket->qb_write.tb_iops_last_fill = now;
++	bucket->qb_write.tb_bw_rate = bw_rate_write;
++	bucket->qb_write.tb_bw_burst = bw_rate_write * 2;
++	bucket->qb_write.tb_bw_tokens = bucket->qb_write.tb_bw_burst;
++	bucket->qb_write.tb_bw_last_fill = now;
++
++	bucket->qb_io_size_max = io_size_max;
++	mutex_exit(&bucket->qb_lock);
++}
++
++void
++qos_bucket_enable(qos_bucket_t *bucket)
++{
++	mutex_enter(&bucket->qb_lock);
++	bucket->qb_enabled = B_TRUE;
++	mutex_exit(&bucket->qb_lock);
++}
++
++void
++qos_bucket_disable(qos_bucket_t *bucket)
++{
++	list_t drain;
++	qos_waiter_t *w;
++
++	list_create(&drain, sizeof (qos_waiter_t),
++	    offsetof(qos_waiter_t, qw_node));
++
++	/* Collect waiters under lock. */
++	mutex_enter(&bucket->qb_lock);
++	bucket->qb_enabled = B_FALSE;
++	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
++		list_insert_tail(&drain, w);
++	bucket->qb_waiter_count = 0;
++	mutex_exit(&bucket->qb_lock);
++
++	/* Dispatch outside lock to avoid deadlock with ZIO pipeline. */
++	while ((w = list_remove_head(&drain)) != NULL) {
++		/* ZIO_FLAG_QOS_APPROVED removed (O-patch09-qos-unify) */
++		zio_execute(w->qw_zio);
++		kmem_free(w, sizeof (qos_waiter_t));
++	}
++	list_destroy(&drain);
++
++	/* Remove from per-pool active list (patch08). */
++	if (bucket->qb_pool != NULL) {
++		dsl_pool_t *pool = bucket->qb_pool;
++		mutex_enter(&pool->dp_qos_active_lock);
++		if (bucket->qb_on_active_list) {
++			list_remove(&pool->dp_qos_active_buckets, bucket);
++			bucket->qb_on_active_list = B_FALSE;
++		}
++		boolean_t empty = list_is_empty(&pool->dp_qos_active_buckets);
++		mutex_exit(&pool->dp_qos_active_lock);
++
++		if (empty) {
++			mutex_enter(&qos_active_pools_lock);
++			if (pool->dp_qos_on_active_pools) {
++				list_remove(&qos_active_pools, pool);
++				pool->dp_qos_on_active_pools = B_FALSE;
++			}
++			mutex_exit(&qos_active_pools_lock);
++		}
++	}
++}
++
++qos_result_t
++qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
++    uint64_t io_size)
++{
++	qos_result_t ret;
++	qos_token_bucket_t *tb;
++
++	mutex_enter(&bucket->qb_lock);
++
++	if (!bucket->qb_enabled) {
++		mutex_exit(&bucket->qb_lock);
++		return (QOS_OK);
++	}
++
++	/* Check io_size_max before refill — hard reject. */
++	if (bucket->qb_io_size_max != 0 &&
++	    io_size > bucket->qb_io_size_max) {
++		atomic_add_64(&bucket->qb_stat_rejected_size, 1);
++		mutex_exit(&bucket->qb_lock);
++		return (QOS_IO_TOO_LARGE);
++	}
++
++	/* QoS R/W split: select direction sub-bucket (Q-patch10) */
++	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
++
++	/* Lazy refill both dimensions (surplus ignored in fast path). */
++	(void) qos_refill_with_surplus(&tb->tb_iops_tokens,
++	    tb->tb_iops_rate, tb->tb_iops_burst,
++	    &tb->tb_iops_last_fill);
++	(void) qos_refill_with_surplus(&tb->tb_bw_tokens,
++	    tb->tb_bw_rate, tb->tb_bw_burst,
++	    &tb->tb_bw_last_fill);
++
++	/* Check tokens.  Rate == 0 means "unlimited" for that dimension. */
++	boolean_t iops_ok = (tb->tb_iops_rate == 0) ||
++	    (tb->tb_iops_tokens >= 1);
++	boolean_t bw_ok = (tb->tb_bw_rate == 0) ||
++	    (tb->tb_bw_tokens >= (int64_t)io_size);
++
++	if (!iops_ok || !bw_ok) {
++		/*
++		 * QoS Boost: combined normal+boost consumption (P-patch08).
++		 *
++		 * When normal tokens alone are insufficient, combine
++		 * remaining normal tokens with boost tokens.  Drain
++		 * normal first (to zero), take the shortfall from boost.
++		 * This allows boost to work with any I/O size, even when
++		 * boost tokens per interval are smaller than one I/O.
++		 */
++		if (bucket->qb_boost_factor > 0) {
++			int64_t n_iops = MAX(0, tb->tb_iops_tokens);
++			int64_t n_bw   = MAX(0, tb->tb_bw_tokens);
++			int64_t need_iops = iops_ok ? 0 : (1 - n_iops);
++			int64_t need_bw = bw_ok ? 0 :
++			    ((int64_t)io_size - n_bw);
++			boolean_t boost_iok = (tb->tb_iops_rate == 0) ||
++			    (tb->tb_boost_iops_tokens >= need_iops);
++			boolean_t boost_bwok = (tb->tb_bw_rate == 0) ||
++			    (tb->tb_boost_bw_tokens >= need_bw);
++			if (boost_iok && boost_bwok) {
++				if (tb->tb_iops_rate > 0) {
++					if (!iops_ok) {
++						tb->tb_boost_iops_tokens -=
++						    need_iops;
++						tb->tb_iops_tokens = 0;
++					} else {
++						tb->tb_iops_tokens -= 1;
++					}
++				}
++				if (tb->tb_bw_rate > 0) {
++					if (!bw_ok) {
++						tb->tb_boost_bw_tokens -=
++						    need_bw;
++						tb->tb_bw_tokens = 0;
++					} else {
++						tb->tb_bw_tokens -=
++						    (int64_t)io_size;
++					}
++				}
++				atomic_add_64(&tb->tb_stat_total_ios, 1);
++				atomic_add_64(&tb->tb_stat_total_bytes,
++				    io_size);
++				bucket->qb_last_consume_time = gethrtime();
++				mutex_exit(&bucket->qb_lock);
++				return (QOS_OK);
++			}
++		}
++		atomic_add_64(&tb->tb_stat_throttle_count, 1);
++		ret = QOS_THROTTLED;
++	} else {
++		/* Consume only dimensions that have a rate set. */
++		if (tb->tb_iops_rate > 0)
++			tb->tb_iops_tokens -= 1;
++		if (tb->tb_bw_rate > 0)
++			tb->tb_bw_tokens -= (int64_t)io_size;
++		atomic_add_64(&tb->tb_stat_total_ios, 1);
++		atomic_add_64(&tb->tb_stat_total_bytes, io_size);
++		/* Track last consume time for idle detection. */
++		bucket->qb_last_consume_time = gethrtime();
++		ret = QOS_OK;
++	}
++
++	/*
++	 * Throttled: add to pool active list so the wake thread can
++	 * distribute surplus tokens to this borrower (pass 2).
++	 * Lock ordering requires releasing qb_lock before acquiring
++	 * dp_qos_active_lock and qos_active_pools_lock.
++	 */
++	if (ret == QOS_THROTTLED && !bucket->qb_on_active_list &&
++	    bucket->qb_pool != NULL) {
++		dsl_pool_t *pool = bucket->qb_pool;
++		mutex_exit(&bucket->qb_lock);
++		mutex_enter(&qos_active_pools_lock);
++		mutex_enter(&pool->dp_qos_active_lock);
++		mutex_enter(&bucket->qb_lock);
++		if (!bucket->qb_on_active_list && bucket->qb_enabled) {
++			list_insert_tail(&pool->dp_qos_active_buckets,
++			    bucket);
++			bucket->qb_on_active_list = B_TRUE;
++		}
++		if (!pool->dp_qos_on_active_pools) {
++			list_insert_tail(&qos_active_pools, pool);
++			pool->dp_qos_on_active_pools = B_TRUE;
++		}
++		mutex_exit(&bucket->qb_lock);
++		mutex_exit(&pool->dp_qos_active_lock);
++		mutex_exit(&qos_active_pools_lock);
++		return (ret);
++	}
++
++	mutex_exit(&bucket->qb_lock);
++	return (ret);
++}
++
++/*
++ * qos_bucket_refund — return bytes to the BW token bucket on tx abort.
++ * Called by dmu_tx_abort() when a transaction that already consumed BW
++ * tokens is abandoned (ERESTART path: consume → ERESTART → abort → retry).
++ * Only refunds BW tokens; IOPS are not refunded (abort cancels the I/O).
++ */
++/* QoS R/W split: refund always to write sub-bucket (Q-patch10) */
++void
++qos_bucket_refund(qos_bucket_t *bucket, uint64_t bytes)
++{
++	if (bytes == 0 || !bucket->qb_enabled)
++		return;
++	mutex_enter(&bucket->qb_lock);
++	if (bucket->qb_write.tb_bw_rate > 0) {
++		bucket->qb_write.tb_bw_tokens = MIN(
++		    bucket->qb_write.tb_bw_tokens + (int64_t)bytes,
++		    bucket->qb_write.tb_bw_burst);
++	}
++	cv_broadcast(&bucket->qb_read_cv);
++	mutex_exit(&bucket->qb_lock);
++}
++
++/*
++ * qos_bucket_wait_consume — blocking consume for DMU read path.
++ * Uses cv_timedwait instead of busy-polling with delay(1).
++ * Wakes on token refill (lazy in try_consume) or cv_broadcast from
++ * qos_bucket_refund.  Falls through after QOS_READ_MAX_RETRIES to
++ * prevent unbounded latency.
++ */
++#define	QOS_READ_MAX_RETRIES	1000	/* 1000 * 10ms = 10s max */
++
++void
++qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
++    uint64_t io_size)
++{
++	int retries = 0;
++	qos_result_t qr;
++
++	do {
++		qr = qos_bucket_try_consume(bucket, type, io_size);
++		if (qr != QOS_THROTTLED)
++			return;
++		/* Wait for token refill instead of busy-polling */
++		mutex_enter(&bucket->qb_lock);
++		if (!bucket->qb_enabled) {
++			mutex_exit(&bucket->qb_lock);
++			return;
++		}
++		(void) cv_timedwait(&bucket->qb_read_cv, &bucket->qb_lock,
++		    ddi_get_lbolt() + MSEC_TO_TICK(10));
++		mutex_exit(&bucket->qb_lock);
++	} while (++retries < QOS_READ_MAX_RETRIES);
++}
++
++/* QoS R/W split: aggregate stats from both directions (Q-patch10) */
++void
++qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
++    uint64_t *total_bytes, uint64_t *throttle_count,
++    uint64_t *throttle_ns, uint64_t *rejected_size)
++{
++	*total_ios = bucket->qb_read.tb_stat_total_ios +
++	    bucket->qb_write.tb_stat_total_ios;
++	*total_bytes = bucket->qb_read.tb_stat_total_bytes +
++	    bucket->qb_write.tb_stat_total_bytes;
++	*throttle_count = bucket->qb_read.tb_stat_throttle_count +
++	    bucket->qb_write.tb_stat_throttle_count;
++	*throttle_ns = bucket->qb_read.tb_stat_throttle_ns_total +
++	    bucket->qb_write.tb_stat_throttle_ns_total;
++	*rejected_size = bucket->qb_stat_rejected_size;
++}
++
++/*
++ * Global wake thread — runs every 1 ms.  Per-pool 3-pass algorithm:
++ *   Pass 1: refill tokens, collect surplus from contributing buckets.
++ *   Pass 2: distribute surplus to boost-enabled buckets (weighted).
++ *   Pass 3: dispatch waiting ZIOs using own + boost tokens.
++ */
++static void
++qos_wake_thread(void *arg)
++{
++	(void) arg;
++
++	mutex_enter(&qos_active_pools_lock);
++
++	while (!qos_wake_exit) {
++		dsl_pool_t *pool;
++		dsl_pool_t *next_pool;
++
++		for (pool = list_head(&qos_active_pools);
++		    pool != NULL; pool = next_pool) {
++			next_pool = list_next(&qos_active_pools, pool);
++
++			/*
++			 * QoS R/W split: persistent surplus pool (Q-patch10 +
++			 * fix v3).  Surplus collected from idle donors is ADDED
++			 * to the persistent buffer.  Distribution subtracts from
++			 * it.  This smooths bursty donations across wake cycles.
++			 */
++			int64_t pool_bw_surplus_read =
++			    pool->dp_qos_surplus_bw_read;
++			int64_t pool_iops_surplus_read =
++			    pool->dp_qos_surplus_iops_read;
++			int64_t pool_bw_surplus_write =
++			    pool->dp_qos_surplus_bw_write;
++			int64_t pool_iops_surplus_write =
++			    pool->dp_qos_surplus_iops_write;
++
++			/* ── PASS 1: refill + collect surplus from idle donors ── */
++			hrtime_t now = gethrtime();
++			int64_t wake_elapsed_ms = 1;
++			if (qos_wake_last_time > 0) {
++				wake_elapsed_ms = (now - qos_wake_last_time) /
++				    1000000;
++				if (wake_elapsed_ms < 1)
++					wake_elapsed_ms = 1;
++				if (wake_elapsed_ms > 1000)
++					wake_elapsed_ms = 1000;
++			}
++			qos_wake_last_time = now;
++			mutex_enter(&pool->dp_qos_active_lock);
++			qos_bucket_t *bucket;
++			qos_bucket_t *next;
++			for (bucket = list_head(&pool->dp_qos_active_buckets);
++			    bucket != NULL; bucket = next) {
++				next = list_next(
++				    &pool->dp_qos_active_buckets, bucket);
++				mutex_enter(&bucket->qb_lock);
++
++				/*
++				 * Removal criteria:
++				 * - disabled, OR
++				 * - no waiters AND not a donor AND stale
++				 */
++				boolean_t is_donor =
++				    bucket->qb_boost_pool &&
++				    (bucket->qb_read.tb_bw_rate > 0 ||
++				    bucket->qb_write.tb_bw_rate > 0);
++				boolean_t recently_active =
++				    (now - bucket->qb_last_consume_time) <
++				    QOS_DONOR_KEEP_NS;
++				boolean_t keep = bucket->qb_enabled &&
++				    (bucket->qb_waiter_count > 0 ||
++				    is_donor ||
++				    recently_active);
++
++				if (!keep) {
++					mutex_exit(&bucket->qb_lock);
++					list_remove(
++					    &pool->dp_qos_active_buckets,
++					    bucket);
++					bucket->qb_on_active_list = B_FALSE;
++					continue;
++				}
++
++				/* QoS R/W split: refill both sub-buckets */
++				int64_t bw_sr = qos_refill_with_surplus(
++				    &bucket->qb_read.tb_bw_tokens,
++				    bucket->qb_read.tb_bw_rate,
++				    bucket->qb_read.tb_bw_burst,
++				    &bucket->qb_read.tb_bw_last_fill);
++				int64_t iops_sr = qos_refill_with_surplus(
++				    &bucket->qb_read.tb_iops_tokens,
++				    bucket->qb_read.tb_iops_rate,
++				    bucket->qb_read.tb_iops_burst,
++				    &bucket->qb_read.tb_iops_last_fill);
++				int64_t bw_sw = qos_refill_with_surplus(
++				    &bucket->qb_write.tb_bw_tokens,
++				    bucket->qb_write.tb_bw_rate,
++				    bucket->qb_write.tb_bw_burst,
++				    &bucket->qb_write.tb_bw_last_fill);
++				int64_t iops_sw = qos_refill_with_surplus(
++				    &bucket->qb_write.tb_iops_tokens,
++				    bucket->qb_write.tb_iops_rate,
++				    bucket->qb_write.tb_iops_burst,
++				    &bucket->qb_write.tb_iops_last_fill);
++
++				/* Collect idle surplus from READ sub-bucket */
++				if (is_donor &&
++				    bucket->qb_waiter_count == 0 &&
++				    bucket->qb_read.tb_bw_rate > 0 &&
++				    bucket->qb_read.tb_bw_tokens >=
++				    (bucket->qb_read.tb_bw_burst *
++				    QOS_IDLE_NUMERATOR /
++				    QOS_IDLE_DENOMINATOR)) {
++					int64_t retain =
++					    bucket->qb_read.tb_bw_burst /
++					    QOS_SURPLUS_RETAIN;
++					int64_t surplus =
++					    bucket->qb_read.tb_bw_tokens -
++					    retain;
++					if (surplus > 0) {
++						bucket->qb_read.tb_bw_tokens =
++						    retain;
++						pool_bw_surplus_read += surplus;
++						atomic_add_64(
++						    &qos_kstat_idle_donors_seen,
++						    1);
++						atomic_add_64(
++						    &qos_kstat_surplus_collected,
++						    (uint64_t)surplus);
++					}
++				}
++				/* Collect idle surplus from WRITE sub-bucket */
++				if (is_donor &&
++				    bucket->qb_waiter_count == 0 &&
++				    bucket->qb_write.tb_bw_rate > 0 &&
++				    bucket->qb_write.tb_bw_tokens >=
++				    (bucket->qb_write.tb_bw_burst *
++				    QOS_IDLE_NUMERATOR /
++				    QOS_IDLE_DENOMINATOR)) {
++					int64_t retain =
++					    bucket->qb_write.tb_bw_burst /
++					    QOS_SURPLUS_RETAIN;
++					int64_t surplus =
++					    bucket->qb_write.tb_bw_tokens -
++					    retain;
++					if (surplus > 0) {
++						bucket->qb_write.tb_bw_tokens =
++						    retain;
++						pool_bw_surplus_write +=
++						    surplus;
++						atomic_add_64(
++						    &qos_kstat_surplus_collected,
++						    (uint64_t)surplus);
++					}
++				}
++				/* Collect refill overflow surplus */
++				if (bucket->qb_boost_pool) {
++					pool_bw_surplus_read += bw_sr;
++					pool_iops_surplus_read += iops_sr;
++					pool_bw_surplus_write += bw_sw;
++					pool_iops_surplus_write += iops_sw;
++				}
++				/* Snapshot for Pass 2 (read locklessly). */
++				bucket->qb_snap_boost_factor =
++				    bucket->qb_boost_factor;
++				bucket->qb_read.tb_snap_bw_rate =
++				    bucket->qb_read.tb_bw_rate;
++				bucket->qb_read.tb_snap_iops_rate =
++				    bucket->qb_read.tb_iops_rate;
++				bucket->qb_write.tb_snap_bw_rate =
++				    bucket->qb_write.tb_bw_rate;
++				bucket->qb_write.tb_snap_iops_rate =
++				    bucket->qb_write.tb_iops_rate;
++				mutex_exit(&bucket->qb_lock);
++			}
++
++			/* Sync kstat data. */
++			qos_wake_kstat_data.qwk_surplus_collected.value.ui64 =
++			    qos_kstat_surplus_collected;
++			qos_wake_kstat_data.qwk_idle_donors_seen.value.ui64 =
++			    qos_kstat_idle_donors_seen;
++
++			/* ── PASS 2: distribute surplus per direction ── */
++			if (pool_bw_surplus_read > 0 ||
++			    pool_iops_surplus_read > 0 ||
++			    pool_bw_surplus_write > 0 ||
++			    pool_iops_surplus_write > 0) {
++#define	QOS_BOOST_SCALE	1000000000000LL	/* 10^12 */
++				/* Weight sums — 4 directions */
++				uint32_t bf;
++				int64_t sum_w_bw_r = 0, sum_w_iops_r = 0;
++				int64_t sum_w_bw_w = 0, sum_w_iops_w = 0;
++				for (bucket = list_head(
++				    &pool->dp_qos_active_buckets);
++				    bucket != NULL;
++				    bucket = list_next(
++				    &pool->dp_qos_active_buckets, bucket)) {
++					bf = bucket->qb_snap_boost_factor;
++					if (bf == 0)
++						continue;
++					sum_w_bw_r += qos_boost_weight(bf,
++					    QOS_BOOST_SCALE,
++					    bucket->qb_read.tb_snap_bw_rate);
++					sum_w_iops_r += qos_boost_weight(bf,
++					    QOS_BOOST_SCALE,
++					    bucket->qb_read.tb_snap_iops_rate);
++					sum_w_bw_w += qos_boost_weight(bf,
++					    QOS_BOOST_SCALE,
++					    bucket->qb_write.tb_snap_bw_rate);
++					sum_w_iops_w += qos_boost_weight(bf,
++					    QOS_BOOST_SCALE,
++					    bucket->qb_write.tb_snap_iops_rate);
++				}
++				/* Distribute read->read, write->write */
++				for (bucket = list_head(
++				    &pool->dp_qos_active_buckets);
++				    bucket != NULL;
++				    bucket = list_next(
++				    &pool->dp_qos_active_buckets, bucket)) {
++					bf = bucket->qb_snap_boost_factor;
++					if (bf == 0)
++						continue;
++					mutex_enter(&bucket->qb_lock);
++					/*
++					 * Boost distribution (P-patch08 fix v3).
++					 *
++					 * Surplus from idle donors is distributed
++					 * to active consumers with TWO limits:
++					 * 1. Storage cap (boost_factor × rate)
++					 *    — max tokens stored at any instant.
++					 * 2. Time-proportional refill rate limit:
++					 *    max_refill = boost_factor × rate ×
++					 *    wake_elapsed_ms / 1000, so the
++					 *    effective boost rate is always
++					 *    boost_factor × rate regardless of
++					 *    wake thread frequency.
++					 *
++					 * Without the refill rate limit, large
++					 * surplus from idle donors would refill
++					 * boost faster than consumption, making
++					 * the storage cap ineffective at limiting
++					 * throughput.
++					 */
++					/* READ direction — BW */
++					if (sum_w_bw_r > 0 &&
++					    bucket->qb_read.
++					    tb_snap_bw_rate > 0) {
++						int64_t w = qos_boost_weight(
++						    bf, QOS_BOOST_SCALE,
++						    bucket->qb_read.
++						    tb_snap_bw_rate);
++						int64_t share =
++						    pool_bw_surplus_read *
++						    w / sum_w_bw_r;
++						int64_t max_refill =
++						    (int64_t)bf *
++						    bucket->qb_read.
++						    tb_snap_bw_rate *
++						    wake_elapsed_ms / 1000;
++						if (max_refill > 0)
++							share = MIN(share,
++							    max_refill);
++						int64_t old = bucket->qb_read.
++						    tb_boost_bw_tokens;
++						bucket->qb_read.
++						    tb_boost_bw_tokens = MIN(
++						    old + share,
++						    bucket->qb_read.
++						    tb_boost_bw_cap);
++						int64_t actual =
++						    bucket->qb_read.
++						    tb_boost_bw_tokens - old;
++						pool_bw_surplus_read -= actual;
++						atomic_add_64(
++						    &qos_kstat_surplus_distributed,
++						    (uint64_t)actual);
++					}
++					/* READ direction — IOPS */
++					if (sum_w_iops_r > 0 &&
++					    bucket->qb_read.
++					    tb_snap_iops_rate > 0) {
++						int64_t w = qos_boost_weight(
++						    bf, QOS_BOOST_SCALE,
++						    bucket->qb_read.
++						    tb_snap_iops_rate);
++						int64_t share =
++						    pool_iops_surplus_read *
++						    w / sum_w_iops_r;
++						int64_t max_refill =
++						    (int64_t)bf *
++						    bucket->qb_read.
++						    tb_snap_iops_rate *
++						    wake_elapsed_ms / 1000;
++						if (max_refill > 0)
++							share = MIN(share,
++							    max_refill);
++						int64_t old = bucket->qb_read.
++						    tb_boost_iops_tokens;
++						bucket->qb_read.
++						    tb_boost_iops_tokens = MIN(
++						    old + share,
++						    bucket->qb_read.
++						    tb_boost_iops_cap);
++						pool_iops_surplus_read -=
++						    (bucket->qb_read.
++						    tb_boost_iops_tokens - old);
++					}
++					/* WRITE direction — BW */
++					if (sum_w_bw_w > 0 &&
++					    bucket->qb_write.
++					    tb_snap_bw_rate > 0) {
++						int64_t w = qos_boost_weight(
++						    bf, QOS_BOOST_SCALE,
++						    bucket->qb_write.
++						    tb_snap_bw_rate);
++						int64_t share =
++						    pool_bw_surplus_write *
++						    w / sum_w_bw_w;
++						int64_t max_refill =
++						    (int64_t)bf *
++						    bucket->qb_write.
++						    tb_snap_bw_rate *
++						    wake_elapsed_ms / 1000;
++						if (max_refill > 0)
++							share = MIN(share,
++							    max_refill);
++						int64_t old = bucket->qb_write.
++						    tb_boost_bw_tokens;
++						bucket->qb_write.
++						    tb_boost_bw_tokens = MIN(
++						    old + share,
++						    bucket->qb_write.
++						    tb_boost_bw_cap);
++						int64_t actual =
++						    bucket->qb_write.
++						    tb_boost_bw_tokens - old;
++						pool_bw_surplus_write -= actual;
++						atomic_add_64(
++						    &qos_kstat_surplus_distributed,
++						    (uint64_t)actual);
++					}
++					/* WRITE direction — IOPS */
++					if (sum_w_iops_w > 0 &&
++					    bucket->qb_write.
++					    tb_snap_iops_rate > 0) {
++						int64_t w = qos_boost_weight(
++						    bf, QOS_BOOST_SCALE,
++						    bucket->qb_write.
++						    tb_snap_iops_rate);
++						int64_t share =
++						    pool_iops_surplus_write *
++						    w / sum_w_iops_w;
++						int64_t max_refill =
++						    (int64_t)bf *
++						    bucket->qb_write.
++						    tb_snap_iops_rate *
++						    wake_elapsed_ms / 1000;
++						if (max_refill > 0)
++							share = MIN(share,
++							    max_refill);
++						int64_t old = bucket->qb_write.
++						    tb_boost_iops_tokens;
++						bucket->qb_write.
++						    tb_boost_iops_tokens = MIN(
++						    old + share,
++						    bucket->qb_write.
++						    tb_boost_iops_cap);
++						pool_iops_surplus_write -=
++						    (bucket->qb_write.
++						    tb_boost_iops_tokens - old);
++					}
++					atomic_add_64(
++					    &qos_kstat_active_buckets_seen,
++					    1);
++					mutex_exit(&bucket->qb_lock);
++				}
++
++				/* Save remaining surplus back to persistent pool.
++				 * Cap to prevent unbounded growth (10s of total). */
++				pool->dp_qos_surplus_bw_read = MIN(
++				    MAX(pool_bw_surplus_read, 0),
++				    pool->dp_qos_total_bw * 10);
++				pool->dp_qos_surplus_bw_write = MIN(
++				    MAX(pool_bw_surplus_write, 0),
++				    pool->dp_qos_total_bw * 10);
++				pool->dp_qos_surplus_iops_read =
++				    MAX(pool_iops_surplus_read, 0);
++				pool->dp_qos_surplus_iops_write =
++				    MAX(pool_iops_surplus_write, 0);
++				qos_wake_kstat_data.
++				    qwk_active_buckets_seen.value.ui64 =
++				    qos_kstat_active_buckets_seen;
++				qos_wake_kstat_data.
++				    qwk_surplus_distributed.value.ui64 =
++				    qos_kstat_surplus_distributed;
++#undef QOS_BOOST_SCALE
++			}
++
++			/*
++			 * ── PASS 3: dispatch waiters ──
++			 * ZIO waiters have no direction (legacy, mostly
++			 * empty after O-patch09).  Use READ sub-bucket
++			 * for token checks (conservatif).
++			 */
++			for (bucket = list_head(&pool->dp_qos_active_buckets);
++			    bucket != NULL; bucket = next) {
++				next = list_next(
++				    &pool->dp_qos_active_buckets, bucket);
++				mutex_enter(&bucket->qb_lock);
++				qos_waiter_t *w;
++				while ((w = list_head(&bucket->qb_waiters))
++				    != NULL) {
++					uint64_t sz = w->qw_zio->io_size;
++					boolean_t iok =
++					    (bucket->qb_read.
++					    tb_iops_rate == 0) ||
++					    (bucket->qb_read.
++					    tb_iops_tokens >= 1) ||
++					    (bucket->qb_boost_factor > 0 &&
++					    bucket->qb_read.
++					    tb_boost_iops_tokens >= 1);
++					boolean_t bwok =
++					    (bucket->qb_read.
++					    tb_bw_rate == 0) ||
++					    (bucket->qb_read.tb_bw_tokens >=
++					    (int64_t)sz) ||
++					    (bucket->qb_boost_factor > 0 &&
++					    bucket->qb_read.
++					    tb_boost_bw_tokens >=
++					    (int64_t)sz);
++					if (!iok || !bwok)
++						break;
++					/* Consume own tokens first, boost */
++					if (bucket->qb_read.
++					    tb_iops_rate > 0) {
++						if (bucket->qb_read.
++						    tb_iops_tokens >= 1)
++							bucket->qb_read.
++							    tb_iops_tokens--;
++						else
++							bucket->qb_read.
++							    tb_boost_iops_tokens
++							    --;
++					}
++					if (bucket->qb_read.
++					    tb_bw_rate > 0) {
++						if (bucket->qb_read.
++						    tb_bw_tokens >=
++						    (int64_t)sz)
++							bucket->qb_read.
++							    tb_bw_tokens -=
++							    (int64_t)sz;
++						else
++							bucket->qb_read.
++							    tb_boost_bw_tokens
++							    -= (int64_t)sz;
++					}
++					atomic_add_64(
++					    &bucket->qb_read.
++					    tb_stat_total_ios, 1);
++					atomic_add_64(
++					    &bucket->qb_read.
++					    tb_stat_total_bytes, sz);
++					hrtime_t wait_ns =
++					    gethrtime() - w->qw_enqueue_time;
++					atomic_add_64(
++					    &bucket->qb_read.
++					    tb_stat_throttle_ns_total,
++					    wait_ns);
++					list_remove(&bucket->qb_waiters, w);
++					bucket->qb_waiter_count--;
++					w->qw_zio->io_qos_waiter = NULL;
++					mutex_exit(&bucket->qb_lock);
++					zio_async_dispatch(w->qw_zio);
++					kmem_free(w, sizeof (qos_waiter_t));
++					mutex_enter(&bucket->qb_lock);
++				}
++				if (bucket->qb_waiter_count == 0) {
++					boolean_t donor_keep =
++					    bucket->qb_boost_pool &&
++					    (bucket->qb_read.
++					    tb_bw_rate > 0 ||
++					    bucket->qb_write.
++					    tb_bw_rate > 0) &&
++					    bucket->qb_enabled;
++					mutex_exit(&bucket->qb_lock);
++					if (!donor_keep) {
++						list_remove(
++						    &pool->dp_qos_active_buckets,
++						    bucket);
++						bucket->qb_on_active_list =
++						    B_FALSE;
++					}
++				} else {
++					mutex_exit(&bucket->qb_lock);
++				}
++			}
++
++			/* Remove pool if no active buckets remain. */
++			if (list_is_empty(&pool->dp_qos_active_buckets)) {
++				list_remove(&qos_active_pools, pool);
++				pool->dp_qos_on_active_pools = B_FALSE;
++			}
++
++			mutex_exit(&pool->dp_qos_active_lock);
++		}
++
++		/* Sleep 1 ms or until signaled. */
++		(void) cv_timedwait_sig(&qos_wake_cv,
++		    &qos_active_pools_lock,
++		    ddi_get_lbolt() + MSEC_TO_TICK(QOS_WAKE_INTERVAL_MS));
++	}
++
++	mutex_exit(&qos_active_pools_lock);
++	thread_exit();
++}
++
++void
++qos_system_init(void)
++{
++	mutex_init(&qos_active_pools_lock, NULL, MUTEX_DEFAULT, NULL);
++	cv_init(&qos_wake_cv, NULL, CV_DEFAULT, NULL);
++	list_create(&qos_active_pools, sizeof (dsl_pool_t),
++	    offsetof(dsl_pool_t, dp_qos_active_node));
++	qos_wake_exit = B_FALSE;
++
++	qos_wake_kstat = kstat_create("zfs", 0, "qos-boost-wake",
++	    "misc", KSTAT_TYPE_NAMED,
++	    sizeof (qos_wake_kstat_data) / sizeof (kstat_named_t),
++	    KSTAT_FLAG_VIRTUAL);
++	if (qos_wake_kstat != NULL) {
++		qos_wake_kstat->ks_data = &qos_wake_kstat_data;
++		kstat_install(qos_wake_kstat);
++	}
++
++	qos_wake_thr = thread_create(NULL, 0, qos_wake_thread,
++	    NULL, 0, &p0, TS_RUN, defclsyspri);
++}
++
++void
++qos_system_fini(void)
++{
++	mutex_enter(&qos_active_pools_lock);
++	qos_wake_exit = B_TRUE;
++	cv_signal(&qos_wake_cv);
++	mutex_exit(&qos_active_pools_lock);
++
++	thread_join(qos_wake_thr);
++
++	if (qos_wake_kstat != NULL) {
++		kstat_delete(qos_wake_kstat);
++		qos_wake_kstat = NULL;
++	}
++
++	list_destroy(&qos_active_pools);
++	cv_destroy(&qos_wake_cv);
++	mutex_destroy(&qos_active_pools_lock);
++}
+--- zfs-2.4.1/module/zfs/qos_kstat.c	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/module/zfs/qos_kstat.c	2026-04-14 20:39:24.051382408 +0000
+@@ -0,0 +1,312 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or https://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * QoS kstat exporter — per-dataset I/O rate limiting metrics.
++ *
++ * Exposes 28 kstat_named_t fields per QoS-enabled dataset under
++ * /proc/spl/kstat/zfs/<pool>/qos-0x<objid>.
++ * R/W split: per-direction stats (Q-patch10).
++ */
++
++#include <sys/qos_bucket.h>
++#include <sys/dsl_dataset.h>
++#include <sys/dsl_dir.h>
++#include <sys/spa.h>
++#include <sys/kstat.h>
++#include <sys/zfs_context.h>
++
++/*
++ * kstat values — 28 named fields: per-direction config, stats, tokens, boost
++ * (Q-patch10 R/W split).
++ */
++typedef struct qos_kstat_values {
++	/* Configuration — per direction */
++	kstat_named_t	qkv_config_iops_rate_read;
++	kstat_named_t	qkv_config_iops_rate_write;
++	kstat_named_t	qkv_config_bw_rate_read;
++	kstat_named_t	qkv_config_bw_rate_write;
++	/* Configuration — shared */
++	kstat_named_t	qkv_config_io_size_max;
++	/* Cumulative stats — per direction */
++	kstat_named_t	qkv_stat_total_ios_read;
++	kstat_named_t	qkv_stat_total_ios_write;
++	kstat_named_t	qkv_stat_total_bytes_read;
++	kstat_named_t	qkv_stat_total_bytes_write;
++	kstat_named_t	qkv_stat_throttle_count_read;
++	kstat_named_t	qkv_stat_throttle_count_write;
++	kstat_named_t	qkv_stat_throttle_ns_read;
++	kstat_named_t	qkv_stat_throttle_ns_write;
++	/* Shared stats */
++	kstat_named_t	qkv_stat_rejected_size;
++	/* Instantaneous rates — per direction */
++	kstat_named_t	qkv_stat_current_iops_read;
++	kstat_named_t	qkv_stat_current_iops_write;
++	kstat_named_t	qkv_stat_current_bw_read;
++	kstat_named_t	qkv_stat_current_bw_write;
++	/* Live tokens — per direction */
++	kstat_named_t	qkv_stat_iops_tokens_read;
++	kstat_named_t	qkv_stat_iops_tokens_write;
++	kstat_named_t	qkv_stat_bw_tokens_read;
++	kstat_named_t	qkv_stat_bw_tokens_write;
++	kstat_named_t	qkv_stat_waiter_count;
++	/* Boost — shared + per direction */
++	kstat_named_t	qkv_boost_factor;
++	kstat_named_t	qkv_boost_bw_tokens_read;
++	kstat_named_t	qkv_boost_bw_tokens_write;
++	kstat_named_t	qkv_boost_iops_tokens_read;
++	kstat_named_t	qkv_boost_iops_tokens_write;
++} qos_kstat_values_t;
++
++static qos_kstat_values_t empty_qos_kstats = {
++	{ "config_iops_rate_read",	KSTAT_DATA_UINT64 },
++	{ "config_iops_rate_write",	KSTAT_DATA_UINT64 },
++	{ "config_bw_rate_read",	KSTAT_DATA_UINT64 },
++	{ "config_bw_rate_write",	KSTAT_DATA_UINT64 },
++	{ "config_io_size_max",		KSTAT_DATA_UINT64 },
++	{ "stat_total_ios_read",	KSTAT_DATA_UINT64 },
++	{ "stat_total_ios_write",	KSTAT_DATA_UINT64 },
++	{ "stat_total_bytes_read",	KSTAT_DATA_UINT64 },
++	{ "stat_total_bytes_write",	KSTAT_DATA_UINT64 },
++	{ "stat_throttle_count_read",	KSTAT_DATA_UINT64 },
++	{ "stat_throttle_count_write",	KSTAT_DATA_UINT64 },
++	{ "stat_throttle_ns_read",	KSTAT_DATA_UINT64 },
++	{ "stat_throttle_ns_write",	KSTAT_DATA_UINT64 },
++	{ "stat_rejected_size",		KSTAT_DATA_UINT64 },
++	{ "stat_current_iops_read",	KSTAT_DATA_UINT64 },
++	{ "stat_current_iops_write",	KSTAT_DATA_UINT64 },
++	{ "stat_current_bw_read",	KSTAT_DATA_UINT64 },
++	{ "stat_current_bw_write",	KSTAT_DATA_UINT64 },
++	{ "stat_iops_tokens_read",	KSTAT_DATA_UINT64 },
++	{ "stat_iops_tokens_write",	KSTAT_DATA_UINT64 },
++	{ "stat_bw_tokens_read",	KSTAT_DATA_UINT64 },
++	{ "stat_bw_tokens_write",	KSTAT_DATA_UINT64 },
++	{ "stat_waiter_count",		KSTAT_DATA_UINT64 },
++	{ "boost_factor",		KSTAT_DATA_UINT64 },
++	{ "boost_bw_tokens_read",	KSTAT_DATA_UINT64 },
++	{ "boost_bw_tokens_write",	KSTAT_DATA_UINT64 },
++	{ "boost_iops_tokens_read",	KSTAT_DATA_UINT64 },
++	{ "boost_iops_tokens_write",	KSTAT_DATA_UINT64 },
++};
++
++/*
++ * Internal state for delta-based current_iops / current_bw calculation.
++ * Struct definition is private to this file (no public header).
++ * dsl_dataset_t holds a pointer: struct qos_kstat *ds_qos_kstat.
++ */
++/* QoS R/W split: 2 pairs of deltas for per-direction rates (Q-patch10) */
++struct qos_kstat {
++	kstat_t		*qk_kstat;
++	dsl_dataset_t	*qk_ds;
++	uint64_t	qk_last_ios_read;
++	uint64_t	qk_last_bytes_read;
++	uint64_t	qk_last_ios_write;
++	uint64_t	qk_last_bytes_write;
++	hrtime_t	qk_last_time;
++};
++
++static int
++qos_kstat_update(kstat_t *ksp, int rw)
++{
++	struct qos_kstat *qk = ksp->ks_private;
++	qos_kstat_values_t *qkv = ksp->ks_data;
++	qos_bucket_t *bucket = &qk->qk_ds->ds_qos;
++
++	if (rw == KSTAT_WRITE)
++		return (EACCES);
++
++	hrtime_t now = gethrtime();
++	hrtime_t elapsed = now - qk->qk_last_time;
++
++	/* Config and live tokens (under qb_lock for consistency). */
++	mutex_enter(&bucket->qb_lock);
++	qkv->qkv_config_iops_rate_read.value.ui64 =
++	    (uint64_t)bucket->qb_read.tb_iops_rate;
++	qkv->qkv_config_iops_rate_write.value.ui64 =
++	    (uint64_t)bucket->qb_write.tb_iops_rate;
++	qkv->qkv_config_bw_rate_read.value.ui64 =
++	    (uint64_t)bucket->qb_read.tb_bw_rate;
++	qkv->qkv_config_bw_rate_write.value.ui64 =
++	    (uint64_t)bucket->qb_write.tb_bw_rate;
++	qkv->qkv_config_io_size_max.value.ui64 =
++	    bucket->qb_io_size_max;
++	int64_t iops_tok_r = bucket->qb_read.tb_iops_tokens;
++	int64_t bw_tok_r = bucket->qb_read.tb_bw_tokens;
++	int64_t iops_tok_w = bucket->qb_write.tb_iops_tokens;
++	int64_t bw_tok_w = bucket->qb_write.tb_bw_tokens;
++	uint32_t waiter_count = bucket->qb_waiter_count;
++	uint32_t boost_factor = bucket->qb_boost_factor;
++	int64_t boost_bw_r = bucket->qb_read.tb_boost_bw_tokens;
++	int64_t boost_iops_r = bucket->qb_read.tb_boost_iops_tokens;
++	int64_t boost_bw_w = bucket->qb_write.tb_boost_bw_tokens;
++	int64_t boost_iops_w = bucket->qb_write.tb_boost_iops_tokens;
++	mutex_exit(&bucket->qb_lock);
++
++	/* Cumulative stats (atomic — lockless read OK). */
++	uint64_t total_ios_r = bucket->qb_read.tb_stat_total_ios;
++	uint64_t total_bytes_r = bucket->qb_read.tb_stat_total_bytes;
++	uint64_t total_ios_w = bucket->qb_write.tb_stat_total_ios;
++	uint64_t total_bytes_w = bucket->qb_write.tb_stat_total_bytes;
++	qkv->qkv_stat_total_ios_read.value.ui64 = total_ios_r;
++	qkv->qkv_stat_total_ios_write.value.ui64 = total_ios_w;
++	qkv->qkv_stat_total_bytes_read.value.ui64 = total_bytes_r;
++	qkv->qkv_stat_total_bytes_write.value.ui64 = total_bytes_w;
++	qkv->qkv_stat_throttle_count_read.value.ui64 =
++	    bucket->qb_read.tb_stat_throttle_count;
++	qkv->qkv_stat_throttle_count_write.value.ui64 =
++	    bucket->qb_write.tb_stat_throttle_count;
++	qkv->qkv_stat_throttle_ns_read.value.ui64 =
++	    bucket->qb_read.tb_stat_throttle_ns_total;
++	qkv->qkv_stat_throttle_ns_write.value.ui64 =
++	    bucket->qb_write.tb_stat_throttle_ns_total;
++	qkv->qkv_stat_rejected_size.value.ui64 =
++	    bucket->qb_stat_rejected_size;
++
++	/*
++	 * Instantaneous rates per direction: delta since last read.
++	 * Integer division for >= 1s intervals to avoid overflow.
++	 */
++	if (elapsed > 0 && qk->qk_last_time > 0) {
++		uint64_t d_ios_r = total_ios_r - qk->qk_last_ios_read;
++		uint64_t d_bytes_r = total_bytes_r - qk->qk_last_bytes_read;
++		uint64_t d_ios_w = total_ios_w - qk->qk_last_ios_write;
++		uint64_t d_bytes_w = total_bytes_w - qk->qk_last_bytes_write;
++		uint64_t elapsed_sec = elapsed / NANOSEC;
++
++		if (elapsed_sec > 0) {
++			qkv->qkv_stat_current_iops_read.value.ui64 =
++			    d_ios_r / elapsed_sec;
++			qkv->qkv_stat_current_bw_read.value.ui64 =
++			    d_bytes_r / elapsed_sec;
++			qkv->qkv_stat_current_iops_write.value.ui64 =
++			    d_ios_w / elapsed_sec;
++			qkv->qkv_stat_current_bw_write.value.ui64 =
++			    d_bytes_w / elapsed_sec;
++		} else {
++			qkv->qkv_stat_current_iops_read.value.ui64 =
++			    d_ios_r * NANOSEC / elapsed;
++			qkv->qkv_stat_current_bw_read.value.ui64 =
++			    d_bytes_r * NANOSEC / elapsed;
++			qkv->qkv_stat_current_iops_write.value.ui64 =
++			    d_ios_w * NANOSEC / elapsed;
++			qkv->qkv_stat_current_bw_write.value.ui64 =
++			    d_bytes_w * NANOSEC / elapsed;
++		}
++	}
++	qk->qk_last_ios_read = total_ios_r;
++	qk->qk_last_bytes_read = total_bytes_r;
++	qk->qk_last_ios_write = total_ios_w;
++	qk->qk_last_bytes_write = total_bytes_w;
++	qk->qk_last_time = now;
++
++	/* Live token state (clamp negative to 0 for display). */
++	qkv->qkv_stat_iops_tokens_read.value.ui64 =
++	    iops_tok_r > 0 ? (uint64_t)iops_tok_r : 0;
++	qkv->qkv_stat_bw_tokens_read.value.ui64 =
++	    bw_tok_r > 0 ? (uint64_t)bw_tok_r : 0;
++	qkv->qkv_stat_iops_tokens_write.value.ui64 =
++	    iops_tok_w > 0 ? (uint64_t)iops_tok_w : 0;
++	qkv->qkv_stat_bw_tokens_write.value.ui64 =
++	    bw_tok_w > 0 ? (uint64_t)bw_tok_w : 0;
++	qkv->qkv_stat_waiter_count.value.ui64 = waiter_count;
++
++	/* Boost */
++	qkv->qkv_boost_factor.value.ui64 = boost_factor;
++	qkv->qkv_boost_bw_tokens_read.value.ui64 =
++	    boost_bw_r > 0 ? (uint64_t)boost_bw_r : 0;
++	qkv->qkv_boost_bw_tokens_write.value.ui64 =
++	    boost_bw_w > 0 ? (uint64_t)boost_bw_w : 0;
++	qkv->qkv_boost_iops_tokens_read.value.ui64 =
++	    boost_iops_r > 0 ? (uint64_t)boost_iops_r : 0;
++	qkv->qkv_boost_iops_tokens_write.value.ui64 =
++	    boost_iops_w > 0 ? (uint64_t)boost_iops_w : 0;
++
++	return (0);
++}
++
++void
++qos_kstat_create(dsl_dataset_t *ds)
++{
++	char kstat_module_name[KSTAT_STRLEN];
++	char kstat_name[KSTAT_STRLEN];
++	int n;
++
++	/* Guard: skip if already created or snapshot. */
++	if (ds->ds_qos_kstat != NULL || ds->ds_is_snapshot)
++		return;
++
++	n = snprintf(kstat_module_name, sizeof (kstat_module_name),
++	    "zfs/%s", spa_name(ds->ds_dir->dd_pool->dp_spa));
++	if (n < 0 || n >= KSTAT_STRLEN) {
++		zfs_dbgmsg("ds %llu: qos kstat module name truncated",
++		    (unsigned long long)ds->ds_object);
++		return;
++	}
++
++	n = snprintf(kstat_name, sizeof (kstat_name),
++	    "qos-0x%llx", (unsigned long long)ds->ds_object);
++	if (n < 0 || n >= KSTAT_STRLEN) {
++		zfs_dbgmsg("ds %llu: qos kstat name truncated",
++		    (unsigned long long)ds->ds_object);
++		return;
++	}
++
++	kstat_t *kstat = kstat_create(kstat_module_name, 0, kstat_name,
++	    "qos", KSTAT_TYPE_NAMED,
++	    sizeof (empty_qos_kstats) / sizeof (kstat_named_t),
++	    KSTAT_FLAG_VIRTUAL);
++	if (kstat == NULL)
++		return;
++
++	qos_kstat_values_t *qkv =
++	    kmem_alloc(sizeof (empty_qos_kstats), KM_SLEEP);
++	memcpy(qkv, &empty_qos_kstats, sizeof (empty_qos_kstats));
++
++	struct qos_kstat *qk =
++	    kmem_zalloc(sizeof (struct qos_kstat), KM_SLEEP);
++	qk->qk_kstat = kstat;
++	qk->qk_ds = ds;
++	qk->qk_last_time = 0;
++
++	kstat->ks_data = qkv;
++	kstat->ks_update = qos_kstat_update;
++	kstat->ks_private = qk;
++
++	kstat_install(kstat);
++	ds->ds_qos_kstat = qk;
++}
++
++void
++qos_kstat_destroy(dsl_dataset_t *ds)
++{
++	struct qos_kstat *qk = ds->ds_qos_kstat;
++
++	if (qk == NULL)
++		return;
++
++	qos_kstat_values_t *qkv = qk->qk_kstat->ks_data;
++	kstat_delete(qk->qk_kstat);
++	qk->qk_kstat = NULL;
++	ds->ds_qos_kstat = NULL;
++
++	kmem_free(qkv, sizeof (empty_qos_kstats));
++	kmem_free(qk, sizeof (struct qos_kstat));
++}
+--- zfs-2.4.1/module/zfs/zio.c	2026-02-24 21:09:28.156743295 +0000
++++ zfs-2.4.1-qos/module/zfs/zio.c	2026-04-14 20:39:24.052382400 +0000
+@@ -53,6 +53,7 @@
+ #include <sys/trace_zfs.h>
+ #include <sys/abd.h>
+ #include <sys/dsl_crypt.h>
++/* qos_bucket.h removed — ZIO gate eliminated (O-patch09-qos-unify) */
+ #include <cityhash.h>
+ 
+ /*
+@@ -173,7 +174,7 @@
+ 
+ static inline void __zio_execute(zio_t *zio);
+ 
+-static void zio_taskq_dispatch(zio_t *, zio_taskq_type_t, boolean_t);
++void zio_taskq_dispatch(zio_t *, zio_taskq_type_t, boolean_t);
+ 
+ static int
+ zio_kstats_update(kstat_t *ksp, int rw)
+@@ -1020,6 +1021,7 @@
+ 	zio->io_orig_pipeline = zio->io_pipeline = pipeline;
+ 	zio->io_pipeline_trace = ZIO_STAGE_OPEN;
+ 	zio->io_allocator = ZIO_ALLOCATOR_NONE;
++	zio->io_dataset = NULL;
+ 
+ 	zio->io_state[ZIO_WAIT_READY] = (stage >= ZIO_STAGE_READY) ||
+ 	    (pipeline & ZIO_STAGE_READY) == 0;
+@@ -1034,6 +1036,9 @@
+ 			zio->io_logical = pio->io_logical;
+ 		if (zio->io_child_type == ZIO_CHILD_GANG)
+ 			zio->io_gang_leader = pio->io_gang_leader;
++		/* Propagate QoS dataset tag to child ZIOs (gang, DDT, vdev). */
++		if (pio->io_dataset != NULL)
++			zio->io_dataset = pio->io_dataset;
+ 		zio_add_child_first(pio, zio);
+ 	}
+ 
+@@ -2149,7 +2154,7 @@
+  * ==========================================================================
+  */
+ 
+-static void
++void
+ zio_taskq_dispatch(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline)
+ {
+ 	spa_t *spa = zio->io_spa;
+@@ -2396,6 +2401,17 @@
+ }
+ 
+ /*
++ * Dispatch a ZIO to the issue taskq for asynchronous execution.
++ * Used by the QoS wake thread to avoid holding locks during
++ * ZIO pipeline execution.
++ */
++void
++zio_async_dispatch(zio_t *zio)
++{
++	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_FALSE);
++}
++
++/*
+  * Used to determine if in the current context the stack is sized large
+  * enough to allow zio_execute() to be called recursively.  A minimum
+  * stack size of 16K is required to avoid needing to re-dispatch the zio.
+@@ -2428,6 +2444,15 @@
+ {
+ 	ASSERT3U(zio->io_queued_timestamp, >, 0);
+ 
++	/*
++	 * Set io_executor early so that zio_wait() sees it is non-NULL
++	 * and blocks until we clear it in zio_done().  Without this,
++	 * a QoS-throttled ZIO would leave io_executor == NULL, causing
++	 * zio_wait() to return before the ZIO completes — a
++	 * use-after-free when the caller frees the ZIO's data buffer.
++	 */
++	zio->io_executor = curthread;
++
+ 	while (zio->io_stage < ZIO_STAGE_DONE) {
+ 		enum zio_stage pipeline = zio->io_pipeline;
+ 		enum zio_stage stage = zio->io_stage;
+--- zfs-2.4.1/module/zfs/dsl_dataset.c	2026-02-24 21:09:27.840744811 +0000
++++ zfs-2.4.1-qos/module/zfs/dsl_dataset.c	2026-04-14 20:39:24.051382408 +0000
+@@ -498,6 +498,8 @@
+ 	mutex_destroy(&ds->ds_remap_deadlist_lock);
+ 	zfs_refcount_destroy(&ds->ds_longholds);
+ 	rrw_destroy(&ds->ds_bp_rwlock);
++	qos_kstat_destroy(ds);
++	qos_bucket_fini(&ds->ds_qos);
+ 
+ 	kmem_free(ds, sizeof (dsl_dataset_t));
+ }
+@@ -595,6 +597,200 @@
+ 	return (result);
+ }
+ 
++/*
++ * QoS: read qos:* user properties and configure the token bucket.
++ * Called at dataset load and on dynamic property change.
++ * Properties are stored as strings in ZAP; read via dsl_prop_get_ds.
++ */
++void
++qos_prop_apply(dsl_dataset_t *ds)
++{
++	char buf[32];
++	unsigned long long tmp = 0;
++	uint32_t io_size_max = 0;
++
++	if (dsl_prop_get_ds(ds, "qos:max_iosize", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) != 0) {
++			zfs_dbgmsg("ds %llu: invalid qos:max_iosize '%s'",
++			    (unsigned long long)ds->ds_object, buf);
++			tmp = 0;
++		}
++		if (tmp > UINT32_MAX) {
++			zfs_dbgmsg("ds %llu: qos:max_iosize %llu exceeds "
++			    "UINT32_MAX, clamping",
++			    (unsigned long long)ds->ds_object, tmp);
++			tmp = UINT32_MAX;
++		}
++		io_size_max = (uint32_t)tmp;
++	}
++
++	/* QoS Boost: read qos:boost and qos:boost_pool (patch08) */
++	uint32_t boost_factor = 0;
++	uint32_t boost_pool_val = 1;	/* default: contributes */
++
++	if (dsl_prop_get_ds(ds, "qos:boost", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) == 0 &&
++		    tmp <= UINT32_MAX)
++			boost_factor = (uint32_t)tmp;
++	}
++
++	if (dsl_prop_get_ds(ds, "qos:boost_pool", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) == 0)
++			boost_pool_val = (tmp != 0) ? 1 : 0;
++	}
++
++	/* qos:count_arc_hits — default: B_TRUE (count all reads) */
++	boolean_t count_arc_hits = B_TRUE;
++	if (dsl_prop_get_ds(ds, "qos:count_arc_hits", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (strcmp(buf, "off") == 0 || strcmp(buf, "0") == 0)
++			count_arc_hits = B_FALSE;
++	}
++
++	/* QoS R/W split: read per-direction properties (Q-patch10) */
++	int64_t bw_read_rate = 0, bw_write_rate = 0;
++	int64_t iops_read_rate = 0, iops_write_rate = 0;
++
++	if (dsl_prop_get_ds(ds, "qos:max_bw_read", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) != 0) {
++			zfs_dbgmsg("ds %llu: invalid qos:max_bw_read '%s'",
++			    (unsigned long long)ds->ds_object, buf);
++			tmp = 0;
++		}
++		bw_read_rate = (int64_t)tmp;
++	}
++	if (dsl_prop_get_ds(ds, "qos:max_bw_write", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) != 0) {
++			zfs_dbgmsg("ds %llu: invalid qos:max_bw_write '%s'",
++			    (unsigned long long)ds->ds_object, buf);
++			tmp = 0;
++		}
++		bw_write_rate = (int64_t)tmp;
++	}
++	if (dsl_prop_get_ds(ds, "qos:max_iops_read", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) != 0) {
++			zfs_dbgmsg("ds %llu: invalid qos:max_iops_read '%s'",
++			    (unsigned long long)ds->ds_object, buf);
++			tmp = 0;
++		}
++		iops_read_rate = (int64_t)tmp;
++	}
++	if (dsl_prop_get_ds(ds, "qos:max_iops_write", 1, sizeof (buf),
++	    buf, NULL) == 0) {
++		if (ddi_strtoull(buf, NULL, 10, &tmp) != 0) {
++			zfs_dbgmsg("ds %llu: invalid qos:max_iops_write '%s'",
++			    (unsigned long long)ds->ds_object, buf);
++			tmp = 0;
++		}
++		iops_write_rate = (int64_t)tmp;
++	}
++
++	/* Track old BW rate for pool-wide total update */
++	int64_t old_bw = ds->ds_qos.qb_enabled ?
++	    ds->ds_qos.qb_write.tb_bw_rate : 0;
++
++	if (iops_read_rate > 0 || iops_write_rate > 0 ||
++	    bw_read_rate > 0 || bw_write_rate > 0) {
++		qos_bucket_configure_split(&ds->ds_qos,
++		    iops_read_rate, bw_read_rate,
++		    iops_write_rate, bw_write_rate,
++		    io_size_max);
++		qos_bucket_enable(&ds->ds_qos);
++		/* Create kstat on first enable; idempotent if exists. */
++		qos_kstat_create(ds);
++	} else {
++		qos_kstat_destroy(ds);
++		qos_bucket_disable(&ds->ds_qos);
++	}
++
++	/* QoS Boost: apply boost config per direction (patch08 + Q-patch10) */
++	ds->ds_qos.qb_boost_factor = boost_factor;
++	ds->ds_qos.qb_boost_pool =
++	    (boost_pool_val != 0) ? B_TRUE : B_FALSE;
++	/*
++	 * QoS Boost caps — token storage limit (P-patch08).
++	 *
++	 * The cap limits how many boost tokens can be stored at any instant.
++	 * Set to boost_factor × rate (one second of boost throughput).
++	 * Must be large enough for a single I/O so try_consume() can
++	 * combine normal + boost tokens (see qos_bucket.c).
++	 *
++	 * Throughput is self-regulated: donors donate in bursts (~1×/sec),
++	 * and try_consume() only uses boost for the shortfall after
++	 * normal tokens are exhausted, preventing drain+refill cycling.
++	 */
++	ds->ds_qos.qb_read.tb_boost_bw_cap =
++	    (boost_factor > 0 &&
++	    bw_read_rate > INT64_MAX / (int64_t)boost_factor) ?
++	    INT64_MAX : (int64_t)boost_factor * bw_read_rate;
++	ds->ds_qos.qb_read.tb_boost_iops_cap =
++	    (boost_factor > 0 &&
++	    iops_read_rate > INT64_MAX / (int64_t)boost_factor) ?
++	    INT64_MAX : (int64_t)boost_factor * iops_read_rate;
++	ds->ds_qos.qb_write.tb_boost_bw_cap =
++	    (boost_factor > 0 &&
++	    bw_write_rate > INT64_MAX / (int64_t)boost_factor) ?
++	    INT64_MAX : (int64_t)boost_factor * bw_write_rate;
++	ds->ds_qos.qb_write.tb_boost_iops_cap =
++	    (boost_factor > 0 &&
++	    iops_write_rate > INT64_MAX / (int64_t)boost_factor) ?
++	    INT64_MAX : (int64_t)boost_factor * iops_write_rate;
++	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
++
++	/* QoS Unify: apply count_arc_hits config (O-patch09) */
++	mutex_enter(&ds->ds_qos.qb_lock);
++	ds->ds_qos.qb_count_arc_hits = count_arc_hits;
++	mutex_exit(&ds->ds_qos.qb_lock);
++
++	/*
++	 * If boost_pool=1 is set on an enabled bucket, add it to the
++	 * pool's active bucket list so the wake thread can collect its
++	 * surplus even if it never gets throttled (pure idle donor).
++	 * Lock order: qos_active_pools_lock -> dp_qos_active_lock -> qb_lock.
++	 */
++	if (ds->ds_qos.qb_enabled && ds->ds_qos.qb_boost_pool &&
++	    (ds->ds_qos.qb_read.tb_bw_rate > 0 ||
++	    ds->ds_qos.qb_write.tb_bw_rate > 0)) {
++		dsl_pool_t *pool = ds->ds_dir->dd_pool;
++		ds->ds_qos.qb_last_consume_time = gethrtime();
++		mutex_enter(&qos_active_pools_lock);
++		mutex_enter(&pool->dp_qos_active_lock);
++		mutex_enter(&ds->ds_qos.qb_lock);
++		if (!ds->ds_qos.qb_on_active_list) {
++			list_insert_tail(&pool->dp_qos_active_buckets,
++			    &ds->ds_qos);
++			ds->ds_qos.qb_on_active_list = B_TRUE;
++		}
++		if (!pool->dp_qos_on_active_pools) {
++			list_insert_tail(&qos_active_pools, pool);
++			pool->dp_qos_on_active_pools = B_TRUE;
++		}
++		mutex_exit(&ds->ds_qos.qb_lock);
++		mutex_exit(&pool->dp_qos_active_lock);
++		mutex_exit(&qos_active_pools_lock);
++	}
++
++	/* QoS: update pool-wide dirty quota (F-patch05 + Q-patch10) */
++	{
++		int64_t new_bw = (iops_read_rate > 0 || iops_write_rate > 0 ||
++		    bw_read_rate > 0 || bw_write_rate > 0) ?
++		    bw_write_rate : 0;
++		dsl_pool_t *dp = ds->ds_dir->dd_pool;
++		mutex_enter(&dp->dp_lock);
++		dp->dp_qos_total_bw =
++		    dp->dp_qos_total_bw - (uint64_t)old_bw +
++		    (uint64_t)new_bw;
++		mutex_exit(&dp->dp_lock);
++	}
++	dsl_pool_qos_dirty_update(ds);
++}
++
+ int
+ dsl_dataset_hold_obj(dsl_pool_t *dp, uint64_t dsobj, const void *tag,
+     dsl_dataset_t **dsp)
+@@ -623,6 +819,8 @@
+ 		dsl_dataset_t *winner = NULL;
+ 
+ 		ds = kmem_zalloc(sizeof (dsl_dataset_t), KM_SLEEP);
++		qos_bucket_init(&ds->ds_qos);
++		ds->ds_qos_kstat = NULL;
+ 		ds->ds_dbuf = dbuf;
+ 		ds->ds_object = dsobj;
+ 		ds->ds_is_snapshot = dsl_dataset_phys(ds)->ds_num_children != 0;
+@@ -698,6 +896,11 @@
+ 			ds->ds_reserved = ds->ds_quota = 0;
+ 		}
+ 
++		/* QoS: configure token bucket + kstat for non-snapshots. */
++		if (err == 0 && !ds->ds_is_snapshot) {
++			qos_prop_apply(ds);
++		}
++
+ 		if (err == 0 && ds->ds_dir->dd_crypto_obj != 0 &&
+ 		    ds->ds_is_snapshot &&
+ 		    zap_contains(mos, dsobj, DS_FIELD_IVSET_GUID) != 0) {
+@@ -747,6 +950,8 @@
+ 			mutex_destroy(&ds->ds_remap_deadlist_lock);
+ 			zfs_refcount_destroy(&ds->ds_longholds);
+ 			rrw_destroy(&ds->ds_bp_rwlock);
++			qos_kstat_destroy(ds);
++			qos_bucket_fini(&ds->ds_qos);
+ 			kmem_free(ds, sizeof (dsl_dataset_t));
+ 			if (err != 0) {
+ 				dmu_buf_rele(dbuf, tag);
+--- zfs-2.4.1/module/zfs/dsl_pool.c	2026-02-24 21:09:27.856744734 +0000
++++ zfs-2.4.1-qos/module/zfs/dsl_pool.c	2026-04-14 20:39:24.051382408 +0000
+@@ -51,6 +51,7 @@
+ #include <sys/dsl_userhold.h>
+ #include <sys/trace_zfs.h>
+ #include <sys/mmp.h>
++#include <sys/qos_bucket.h>
+ 
+ /*
+  * ZFS Write Throttle
+@@ -233,6 +234,16 @@
+ 	    100, defclsyspri, boot_ncpus, INT_MAX,
+ 	    TASKQ_PREPOPULATE | TASKQ_DYNAMIC | TASKQ_THREADS_CPU_PCT);
+ 
++	/* QoS Boost: per-pool active bucket list (patch08) */
++	mutex_init(&dp->dp_qos_active_lock, NULL, MUTEX_DEFAULT, NULL);
++	list_create(&dp->dp_qos_active_buckets, sizeof (qos_bucket_t),
++	    offsetof(qos_bucket_t, qb_active_node));
++	dp->dp_qos_on_active_pools = B_FALSE;
++	dp->dp_qos_surplus_bw_read = 0;
++	dp->dp_qos_surplus_bw_write = 0;
++	dp->dp_qos_surplus_iops_read = 0;
++	dp->dp_qos_surplus_iops_write = 0;
++
+ 	return (dp);
+ }
+ 
+@@ -439,6 +450,16 @@
+ 
+ 	taskq_destroy(dp->dp_unlinked_drain_taskq);
+ 	taskq_destroy(dp->dp_zrele_taskq);
++	/* QoS Boost: cleanup per-pool active list (patch08) */
++	mutex_enter(&qos_active_pools_lock);
++	if (dp->dp_qos_on_active_pools) {
++		list_remove(&qos_active_pools, dp);
++		dp->dp_qos_on_active_pools = B_FALSE;
++	}
++	mutex_exit(&qos_active_pools_lock);
++	list_destroy(&dp->dp_qos_active_buckets);
++	mutex_destroy(&dp->dp_qos_active_lock);
++
+ 	if (dp->dp_blkstats != NULL)
+ 		vmem_free(dp->dp_blkstats, sizeof (zfs_all_blkstats_t));
+ 	kmem_free(dp, sizeof (dsl_pool_t));
+@@ -718,6 +739,9 @@
+ 		 */
+ 		ASSERT(!list_link_active(&ds->ds_synced_link));
+ 		list_insert_tail(&synced_datasets, ds);
++		/* QoS: reset per-dataset dirty accounting after sync */
++		if (!ds->ds_is_snapshot && ds->ds_dirty_quota > 0)
++			ds->ds_dirty_bytes = 0;
+ 		dsl_dataset_sync(ds, rio, tx);
+ 	}
+ 	VERIFY0(zio_wait(rio));
+@@ -1000,6 +1024,14 @@
+ 
+ 		if (needsync)
+ 			txg_kick(dp, tx->tx_txg);
++
++		/* QoS: track per-dataset dirty bytes */
++		if (tx->tx_objset != NULL) {
++			dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
++			if (ds != NULL && !ds->ds_is_snapshot &&
++			    ds->ds_dirty_quota > 0)
++				atomic_add_64(&ds->ds_dirty_bytes, space);
++		}
+ 	}
+ }
+ 
+@@ -1022,6 +1054,54 @@
+ 	mutex_exit(&dp->dp_lock);
+ }
+ 
++/*
++ * QoS: recalculate the per-dataset dirty data quota.
++ * quota = bw_rate * zfs_dirty_data_max / dp_qos_total_bw
++ * Called from qos_prop_apply() after bucket configuration changes.
++ *
++ * Scale down numerator and denominator equally so the product
++ * bw * dirty_max stays within uint64_t.  This avoids 128-bit
++ * division (__udivti3) which is not available in kernel space.
++ */
++void
++dsl_pool_qos_dirty_update(dsl_dataset_t *ds)
++{
++	dsl_pool_t *dp = ds->ds_dir->dd_pool;
++	/* QoS R/W split: use write BW rate for dirty quota (Q-patch10) */
++	int64_t bw_rate = ds->ds_qos.qb_write.tb_bw_rate;
++	uint64_t total_bw;
++
++	mutex_enter(&dp->dp_lock);
++	total_bw = dp->dp_qos_total_bw;
++	if (total_bw > 0 && bw_rate > 0) {
++		uint64_t bw = (uint64_t)bw_rate;
++		uint64_t dm = zfs_dirty_data_max;
++		uint64_t tb = total_bw;
++		/*
++		 * Shift bw and tb by equal amounts until bw * dm
++		 * fits in 64 bits.  The ratio bw/tb is preserved.
++		 */
++		while (bw != 0 && dm != 0 && bw > UINT64_MAX / dm) {
++			bw >>= 1;
++			tb >>= 1;
++		}
++		if (tb == 0)
++			tb = 1;
++		ds->ds_dirty_quota = (bw * dm) / tb;
++	} else {
++		ds->ds_dirty_quota = 0;
++	}
++	mutex_exit(&dp->dp_lock);
++
++	zfs_dbgmsg("QoS dirty quota ds %llu: bw=%lld total_bw=%llu "
++	    "dirty_max=%llu quota=%llu",
++	    (u_longlong_t)ds->ds_object,
++	    (longlong_t)bw_rate,
++	    (u_longlong_t)total_bw,
++	    (u_longlong_t)zfs_dirty_data_max,
++	    (u_longlong_t)ds->ds_dirty_quota);
++}
++
+ static int
+ upgrade_clones_cb(dsl_pool_t *dp, dsl_dataset_t *hds, void *arg)
+ {
+--- zfs-2.4.1/module/zfs/dmu.c	2026-02-24 21:09:27.792745041 +0000
++++ zfs-2.4.1-qos/module/zfs/dmu.c	2026-04-14 20:39:57.925112766 +0000
+@@ -53,6 +53,7 @@
+ #include <sys/zio_compress.h>
+ #include <sys/sa.h>
+ #include <sys/zfeature.h>
++#include <sys/qos_bucket.h>
+ #include <sys/abd.h>
+ #include <sys/brt.h>
+ #include <sys/trace_zfs.h>
+@@ -1170,6 +1171,28 @@
+ 	int numbufs, err = 0;
+ 
+ 	/*
++	 * QoS: per-dataset DMU-level bandwidth throttle for reads.
++	 * Mirrors the write chokepoint in dmu_tx_assign().
++	 * Exclusions: snapshots, metadata dnodes, disabled buckets,
++	 * prefetch reads (never counted — data counted via ARC hit).
++	 */
++	if (size > 0 && !(flags & DMU_READ_PREFETCH)) {
++		objset_t *os = dn->dn_objset;
++		if (os != NULL) {
++			dsl_dataset_t *ds = dmu_objset_ds(os);
++			if (ds != NULL &&
++			    !ds->ds_is_snapshot &&
++			    ds->ds_qos.qb_enabled &&
++			    ds->ds_qos.qb_count_arc_hits &&
++			    (dn->dn_type == DMU_OT_PLAIN_FILE_CONTENTS ||
++			    dn->dn_type == DMU_OT_ZVOL)) {
++				qos_bucket_wait_consume(&ds->ds_qos,
++				    QOS_IO_READ, size);
++			}
++		}
++	}
++
++	/*
+ 	 * Deal with odd block sizes, where there can't be data past the first
+ 	 * block. If we ever do the tail block optimization, we will need to
+ 	 * handle that here as well.
+@@ -1400,6 +1423,27 @@
+ 	dmu_buf_t **dbp;
+ 	int numbufs, i, err;
+ 
++	/*
++	 * QoS: per-dataset DMU-level bandwidth throttle for reads.
++	 * Mirrors the write chokepoint in dmu_tx_assign().
++	 * Exclusions: snapshots, metadata dnodes, disabled buckets.
++	 */
++	if (size > 0) {
++		objset_t *os = dn->dn_objset;
++		if (os != NULL) {
++			dsl_dataset_t *ds = dmu_objset_ds(os);
++			if (ds != NULL &&
++			    !ds->ds_is_snapshot &&
++			    ds->ds_qos.qb_enabled &&
++			    ds->ds_qos.qb_count_arc_hits &&
++			    (dn->dn_type == DMU_OT_PLAIN_FILE_CONTENTS ||
++			    dn->dn_type == DMU_OT_ZVOL)) {
++				qos_bucket_wait_consume(&ds->ds_qos,
++				    QOS_IO_READ, size);
++			}
++		}
++	}
++
+ 	if ((flags & DMU_DIRECTIO) && (uio->uio_extflg & UIO_DIRECT))
+ 		return (dmu_read_uio_direct(dn, uio, size, flags));
+ 	flags &= ~DMU_DIRECTIO;
+@@ -2048,6 +2092,9 @@
+ 	 */
+ 	zp->zp_nopwrite = B_FALSE;
+ 
++	if (os->os_dsl_dataset != NULL)
++		pio->io_dataset = os->os_dsl_dataset;
++
+ 	zio_nowait(zio_write(pio, os->os_spa, dmu_tx_get_txg(tx), zgd->zgd_bp,
+ 	    abd_get_from_buf(zgd->zgd_db->db_data, zgd->zgd_db->db_size),
+ 	    zgd->zgd_db->db_size, zgd->zgd_db->db_size, zp,
+@@ -2217,6 +2264,13 @@
+ 	dsa->dsa_zgd = zgd;
+ 	dsa->dsa_tx = NULL;
+ 
++	/*
++	 * ds is guaranteed non-NULL: SET_BOOKMARK() at the top of this
++	 * function already dereferences ds->ds_object.
++	 */
++	ASSERT(ds != NULL);
++	pio->io_dataset = ds;
++
+ 	zio_nowait(arc_write(pio, os->os_spa, txg, zgd->zgd_bp,
+ 	    dr->dt.dl.dr_data, !DBUF_IS_CACHEABLE(db),
+ 	    dbuf_is_l2cacheable(db, NULL), &zp, dmu_sync_ready, NULL,
+--- zfs-2.4.1/module/zfs/dmu_tx.c	2026-02-24 21:09:27.821744902 +0000
++++ zfs-2.4.1-qos/module/zfs/dmu_tx.c	2026-04-17 07:35:56.339818092 +0000
+@@ -40,6 +40,7 @@
+ #include <sys/sa.h>
+ #include <sys/sa_impl.h>
+ #include <sys/zfs_context.h>
++#include <sys/qos_bucket.h>
+ #include <sys/trace_zfs.h>
+ 
+ typedef void (*dmu_tx_hold_func_t)(dmu_tx_t *tx, struct dnode *dn,
+@@ -1133,6 +1134,40 @@
+ 		tohold += zfs_refcount_count(&txh->txh_memory_tohold);
+ 	}
+ 
++	/* QoS: per-dataset dirty quota check */
++	if (!tx->tx_dirty_delayed && tx->tx_objset != NULL) {
++		dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
++		if (ds != NULL && !ds->ds_is_snapshot &&
++		    ds->ds_dirty_quota > 0 &&
++		    ds->ds_dirty_bytes + towrite > ds->ds_dirty_quota) {
++			tx->tx_wait_dirty = B_TRUE;
++			DMU_TX_STAT_BUMP(dmu_tx_dirty_delay);
++			return (SET_ERROR(ERESTART));
++		}
++	}
++
++	/*
++	 * QoS: per-dataset DMU-level bandwidth throttle.
++	 * This enforces qos:max_bw_write for ALL writes (buffered + direct)
++	 * by consuming token-bucket BW tokens at transaction assign time.
++	 * Unlike the ZIO-level gate (which only catches O_DIRECT / CANFAIL),
++	 * this throttle sits above the TXG and catches every write path.
++	 */
++	if (tx->tx_objset != NULL) {
++		dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
++		if (ds != NULL && !ds->ds_is_snapshot &&
++		    ds->ds_qos.qb_enabled && towrite > 0) {
++			qos_result_t qr = qos_bucket_try_consume(
++			    &ds->ds_qos, QOS_IO_WRITE, towrite);
++			if (qr == QOS_THROTTLED) {
++				tx->tx_qos_throttled = B_TRUE;
++				return (SET_ERROR(ERESTART));
++			}
++			/* Track consumed bytes for potential refund on abort */
++			tx->tx_qos_consumed_bytes = towrite;
++		}
++	}
++
+ 	/* needed allocation: worst-case estimate of write space */
+ 	uint64_t asize = spa_get_worst_case_asize(tx->tx_pool->dp_spa, towrite);
+ 	/* calculate memory footprint estimate */
+@@ -1183,6 +1218,15 @@
+ 
+ 	tx->tx_lasttried_txg = tx->tx_txg;
+ 	tx->tx_txg = 0;
++
++	/* Refund QoS tokens consumed in this try_assign attempt */
++	if (tx->tx_qos_consumed_bytes > 0 && tx->tx_objset != NULL) {
++		dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
++		if (ds != NULL && ds->ds_qos.qb_enabled)
++			qos_bucket_refund(&ds->ds_qos,
++			    tx->tx_qos_consumed_bytes);
++		tx->tx_qos_consumed_bytes = 0;
++	}
+ }
+ 
+ /*
+@@ -1344,7 +1388,36 @@
+ 
+ 	before = gethrtime();
+ 
++	if (tx->tx_qos_throttled) {
++		/*
++		 * QoS: DMU-level bandwidth throttle.
++		 * Token bucket is empty — sleep 1 tick to allow refill.
++		 * Keep the sleep minimal (1 tick = 1ms on HZ=1000, 4ms
++		 * on HZ=250) to avoid starving the NFS server thread pool.
++		 * The token bucket refills lazily on the next
++		 * qos_bucket_try_consume() call.
++		 */
++		tx->tx_qos_throttled = B_FALSE;
++		delay(1);
++		spa_tx_assign_add_nsecs(spa, gethrtime() - before);
++		return;
++	}
++
+ 	if (tx->tx_wait_dirty) {
++		/* QoS: per-dataset dirty quota — wait for TXG sync */
++		if (tx->tx_objset != NULL) {
++			dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
++			if (ds != NULL && !ds->ds_is_snapshot &&
++			    ds->ds_dirty_quota > 0 &&
++			    ds->ds_dirty_bytes >= ds->ds_dirty_quota) {
++				txg_wait_synced(dp, 0);
++				tx->tx_wait_dirty = B_FALSE;
++				tx->tx_dirty_delayed = B_TRUE;
++				spa_tx_assign_add_nsecs(spa,
++				    gethrtime() - before);
++				return;
++			}
++		}
+ 		uint64_t dirty;
+ 
+ 		/*
+--- zfs-2.4.1/module/zfs/dmu_send.c	2026-02-24 21:09:27.814744935 +0000
++++ zfs-2.4.1-qos/module/zfs/dmu_send.c	2026-04-14 20:39:24.050382416 +0000
+@@ -1657,11 +1657,15 @@
+ 	 * data that is not likely to be used in the future.
+ 	 */
+ 	if (arc_err != 0) {
++		zio_t *zio;
+ 		srdp->abd = abd_alloc_linear(srdp->datasz, B_FALSE);
+ 		srdp->io_outstanding = B_TRUE;
+-		zio_nowait(zio_read(NULL, os->os_spa, bp, srdp->abd,
++		zio = zio_read(NULL, os->os_spa, bp, srdp->abd,
+ 		    srdp->datasz, dmu_send_read_done, range,
+-		    ZIO_PRIORITY_ASYNC_READ, zioflags, &zb));
++		    ZIO_PRIORITY_ASYNC_READ, zioflags, &zb);
++		if (os->os_dsl_dataset != NULL)
++			zio->io_dataset = os->os_dsl_dataset;
++		zio_nowait(zio);
+ 	}
+ }
+ 
+--- zfs-2.4.1/module/zfs/dmu_direct.c	2026-02-24 21:09:27.798745012 +0000
++++ zfs-2.4.1-qos/module/zfs/dmu_direct.c	2026-04-14 20:39:24.050382416 +0000
+@@ -222,6 +222,8 @@
+ 		return (err);
+ 
+ 	zio_t *pio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
++	if (dn->dn_objset->os_dsl_dataset != NULL)
++		pio->io_dataset = dn->dn_objset->os_dsl_dataset;
+ 
+ 	for (int i = 0; i < numbufs && err == 0; i++) {
+ 		dmu_buf_impl_t *db = (dmu_buf_impl_t *)dbp[i];
+@@ -262,6 +264,8 @@
+ 		return (err);
+ 
+ 	zio_t *rio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
++	if (os->os_dsl_dataset != NULL)
++		rio->io_dataset = os->os_dsl_dataset;
+ 
+ 	for (int i = 0; i < numbufs; i++) {
+ 		dmu_buf_impl_t *db = (dmu_buf_impl_t *)dbp[i];
+--- zfs-2.4.1/module/zfs/dsl_prop.c	2026-02-24 21:09:27.860744714 +0000
++++ zfs-2.4.1-qos/module/zfs/dsl_prop.c	2026-04-14 20:39:24.051382408 +0000
+@@ -899,6 +899,10 @@
+ 
+ 	if (tbuf != NULL)
+ 		kmem_free(tbuf, ZAP_MAXVALUELEN);
++
++	/* QoS: reconfigure token bucket on qos:* property change. */
++	if (strncmp(propname, "qos:", 4) == 0 && !ds->ds_is_snapshot)
++		qos_prop_apply(ds);
+ }
+ 
+ int
+--- zfs-2.4.1/module/zfs/arc.c	2026-02-24 21:09:27.740745290 +0000
++++ zfs-2.4.1-qos/module/zfs/arc.c	2026-04-14 20:39:24.050382416 +0000
+@@ -295,6 +295,7 @@
+ #include <sys/vdev.h>
+ #include <sys/vdev_impl.h>
+ #include <sys/dsl_pool.h>
++#include <sys/dsl_dataset.h>
+ #include <sys/multilist.h>
+ #include <sys/abd.h>
+ #include <sys/dbuf.h>
+@@ -313,6 +314,14 @@
+ #include <sys/zfs_racct.h>
+ #include <sys/zstd/zstd.h>
+ 
++/*
++ * QoS: tag for per-dataset ARC accounting long holds.  arc_read()
++ * and arc_evict_hdr() are separate functions so FTAG (= __func__)
++ * would produce different strings, causing a refcount ASSERT failure
++ * in debug builds.  Use a shared static string instead.
++ */
++static const char arc_qos_tag[] = "arc_qos_ds_hold";
++
+ #ifndef _KERNEL
+ /* set with ZFS_DEBUG=watch, to enable watchpoints on frozen buffers */
+ boolean_t arc_watch = B_FALSE;
+@@ -3317,6 +3326,7 @@
+ 	hdr->b_l1hdr.b_mfu_hits = 0;
+ 	hdr->b_l1hdr.b_mfu_ghost_hits = 0;
+ 	hdr->b_l1hdr.b_buf = NULL;
++	hdr->b_dataset = NULL;
+ 
+ 	ASSERT(zfs_refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
+ 
+@@ -3779,6 +3789,19 @@
+ 	ASSERT0P(hdr->b_l1hdr.b_buf);
+ 	ASSERT0(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt));
+ 
++	/* QoS: decrement per-dataset ARC accounting */
++	if (hdr->b_dataset != NULL) {
++		uint64_t lsize = HDR_GET_LSIZE(hdr);
++		uint64_t old, new_val;
++		do {
++			old = hdr->b_dataset->ds_arc_bytes;
++			new_val = (old >= lsize) ? old - lsize : 0;
++		} while (atomic_cas_64(&hdr->b_dataset->ds_arc_bytes,
++		    old, new_val) != old);
++		dsl_dataset_long_rele(hdr->b_dataset, arc_qos_tag);
++		hdr->b_dataset = NULL;
++	}
++
+ 	*real_evicted = 0;
+ 	state = hdr->b_l1hdr.b_state;
+ 	if (GHOST_STATE(state)) {
+@@ -5393,6 +5416,10 @@
+ 			DTRACE_PROBE1(new_state__mru, arc_buf_hdr_t *, hdr);
+ 		}
+ 		arc_change_state(new_state, hdr);
++		/* QoS: track ARC bytes per dataset on first insertion */
++		if (hdr->b_dataset != NULL)
++			atomic_add_64(&hdr->b_dataset->ds_arc_bytes,
++			    HDR_GET_LSIZE(hdr));
+ 	} else if (hdr->b_l1hdr.b_state == arc_mru) {
+ 		/*
+ 		 * This buffer has been accessed once recently and either
+@@ -6118,6 +6145,32 @@
+ 			hdr = arc_hdr_alloc(guid, psize, lsize,
+ 			    BP_IS_PROTECTED(bp), BP_GET_COMPRESS(bp), 0, type);
+ 
++			/*
++			 * QoS: resolve dataset for per-dataset ARC
++			 * accounting.  Skip in sync context to avoid
++			 * deadlock on dp_config_rwlock (held for
++			 * write by the sync thread).
++			 */
++			if (zb != NULL && zb->zb_objset != 0) {
++				dsl_pool_t *dp = spa_get_dsl(spa);
++				if (dp != NULL &&
++				    !dsl_pool_sync_context(dp)) {
++					dsl_dataset_t *ds;
++					dsl_pool_config_enter(dp, FTAG);
++					if (dsl_dataset_hold_obj(dp,
++					    zb->zb_objset, FTAG,
++					    &ds) == 0) {
++						if (!ds->ds_is_snapshot) {
++							dsl_dataset_long_hold(
++							    ds, arc_qos_tag);
++							hdr->b_dataset = ds;
++						}
++						dsl_dataset_rele(ds, FTAG);
++					}
++					dsl_pool_config_exit(dp, FTAG);
++				}
++			}
++
+ 			if (!embedded_bp) {
+ 				hdr->b_dva = *BP_IDENTITY(bp);
+ 				hdr->b_birth = BP_GET_PHYSICAL_BIRTH(bp);
+--- zfs-2.4.1/module/zfs/zil.c	2026-02-24 21:09:28.153743309 +0000
++++ zfs-2.4.1-qos/module/zfs/zil.c	2026-04-14 20:39:49.589179108 +0000
+@@ -39,6 +39,7 @@
+ #include <sys/zil.h>
+ #include <sys/zil_impl.h>
+ #include <sys/dsl_dataset.h>
++#include <sys/qos_bucket.h>
+ #include <sys/vdev_impl.h>
+ #include <sys/dmu_tx.h>
+ #include <sys/dsl_pool.h>
+@@ -4024,6 +4025,28 @@
+ 		goto out;
+ 	}
+ 
++	/*
++	 * QoS gate for sync writes: consume one IOPS token from the
++	 * per-dataset token bucket.  Block the calling thread (typically
++	 * an NFS server thread) until tokens are available, which delays
++	 * the fsync(2) ACK to the client — the intended throttling effect.
++	 *
++	 * We pass io_size=0 (IOPS-only): the data write ZIO already
++	 * consumed bandwidth tokens in __zio_execute() (PATCH #1),
++	 * so counting BW here would double-charge the dataset.
++	 */
++	{
++		dsl_dataset_t *ds = dmu_objset_ds(zilog->zl_os);
++		if (ds != NULL && ds->ds_qos.qb_enabled) {
++			while (ds->ds_qos.qb_enabled &&
++			    qos_bucket_try_consume(&ds->ds_qos,
++			    QOS_IO_WRITE, 0) == QOS_THROTTLED) {
++				delay(MSEC_TO_TICK(10));
++			}
++			/* QOS_IO_TOO_LARGE impossible with io_size=0. */
++		}
++	}
++
+ 	err = zil_commit_impl(zilog, foid);
+ 
+ out:
+--- zfs-2.4.1/module/zfs/spa_misc.c	2026-02-24 21:09:27.949744288 +0000
++++ zfs-2.4.1-qos/module/zfs/spa_misc.c	2026-04-14 20:39:24.051382408 +0000
+@@ -35,6 +35,7 @@
+ #include <sys/zfs_chksum.h>
+ #include <sys/spa_impl.h>
+ #include <sys/zio.h>
++#include <sys/qos_bucket.h>
+ #include <sys/zio_checksum.h>
+ #include <sys/zio_compress.h>
+ #include <sys/dmu.h>
+@@ -2677,6 +2678,7 @@
+ 	brt_init();
+ 	ddt_init();
+ 	zio_init();
++	qos_system_init();
+ 	dmu_init();
+ 	zil_init();
+ 	vdev_mirror_stat_init();
+@@ -2707,6 +2709,7 @@
+ 	chksum_fini();
+ 	zil_fini();
+ 	dmu_fini();
++	qos_system_fini();
+ 	zio_fini();
+ 	ddt_fini();
+ 	brt_fini();
+--- zfs-2.4.1/module/Kbuild.in	2026-02-24 20:50:55.825269953 +0000
++++ zfs-2.4.1-qos/module/Kbuild.in	2026-04-14 20:39:24.049382424 +0000
+@@ -362,6 +362,8 @@
+ 	multilist.o \
+ 	objlist.o \
+ 	pathname.o \
++	qos_bucket.o \
++	qos_kstat.o \
+ 	range_tree.o \
+ 	refcount.o \
+ 	rrwlock.o \
+--- zfs-2.4.1/lib/libzpool/Makefile.am	2026-02-24 20:50:55.817269981 +0000
++++ zfs-2.4.1-qos/lib/libzpool/Makefile.am	2026-04-14 20:39:24.049382424 +0000
+@@ -118,6 +118,8 @@
+ 	module/zfs/multilist.c \
+ 	module/zfs/objlist.c \
+ 	module/zfs/pathname.c \
++	module/zfs/qos_bucket.c \
++	module/zfs/qos_kstat.c \
+ 	module/zfs/range_tree.c \
+ 	module/zfs/refcount.c \
+ 	module/zfs/rrwlock.c \
+--- zfs-2.4.1/man/man7/zfsprops.7	2026-02-24 20:50:55.820269971 +0000
++++ zfs-2.4.1-qos/man/man7/zfsprops.7	2026-04-14 20:39:24.049382424 +0000
+@@ -2290,3 +2290,44 @@
+ command to clear a user property.
+ If the property is not defined in any parent dataset, it is removed entirely.
+ Property values are limited to 8192 bytes.
++.Ss QoS User Properties
++The following user properties are recognized by the QoS (Quality of Service)
++I/O rate limiting subsystem.
++They control per-dataset I/O throttling via a dual token bucket
++(IOPS and bandwidth).
++These properties are inherited by child datasets.
++Setting a rate to
++.Sy 0
++disables QoS limiting for that dataset.
++.Bl -tag -width "qos:max_iops_write"
++.It Sy qos:max_iops_read
++Maximum read I/O operations per second (integer).
++Each read I/O consumes one IOPS token regardless of size.
++.It Sy qos:max_iops_write
++Maximum write I/O operations per second (integer).
++Each write I/O consumes one IOPS token regardless of size.
++.It Sy qos:max_bw_read
++Maximum read I/O bandwidth in bytes per second (integer).
++Each read I/O consumes tokens equal to its size in bytes.
++.It Sy qos:max_bw_write
++Maximum write I/O bandwidth in bytes per second (integer).
++Each write I/O consumes tokens equal to its size in bytes.
++.It Sy qos:max_iosize
++Maximum allowed I/O size in bytes (integer).
++I/Os larger than this value are rejected with
++.Er EIO .
++Set to
++.Sy 0
++for no limit.
++.El
++.Pp
++Example:
++.Bd -literal -offset indent
++zfs set qos:max_bw_read=104857600 tank/client-001     # 100 MB/s read
++zfs set qos:max_bw_write=52428800 tank/client-001     # 50 MB/s write
++zfs set qos:max_iops_read=5000 tank/client-001
++zfs set qos:max_iops_write=3000 tank/client-001
++zfs set qos:max_iosize=131072 tank/client-001          # 128K
++zfs set qos:max_bw_read=0 tank/client-001              # disable read limit
++zfs inherit qos:max_bw_read tank/client-001            # inherit from parent
++.Ed

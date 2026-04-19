@@ -1,0 +1,1648 @@
+╔══════════════════════════════════════════════════════════════╗
+║          QoS Full Test Chain                                ║
+║  Mode: s1 | Setup: 1 | Reboot: --reboot      ║
+╚══════════════════════════════════════════════════════════════╝
+
+  Started: Sun Apr 19 10:46:55 UTC 2026
+  Log: /home/ubuntu/zfs-qos-241/results/chain_full_20260419_104655.log
+
+
+══════════════════════════════════════════════════════════════
+  PHASE 1 — Full Setup
+══════════════════════════════════════════════════════════════
+╔══════════════════════════════════════════════════════════════╗
+║          QoS Test Infrastructure — Full Setup               ║
+║  5 protocoles × 2 VMs = 10 combinaisons                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+  Options: reboot=1 teardown_only=0 verify_only=0
+  Date: Sun Apr 19 10:46:55 UTC 2026
+
+
+══════════════════════════════════════════════════════════════
+  Phase 0 — Kill tests en cours
+══════════════════════════════════════════════════════════════
+  [32mOK[0m   Processus de test nettoyés
+
+══════════════════════════════════════════════════════════════
+  Phase 1 — Teardown host
+══════════════════════════════════════════════════════════════
+  Unmount NVMe-oF...
+  Unmount iSCSI...
+  Unmount CIFS...
+  Unmount NFS...
+  Disconnect NVMe-oF initiators...
+  Disconnect iSCSI initiators...
+  [32mOK[0m   Host teardown terminé
+
+══════════════════════════════════════════════════════════════
+  Phase 2 — Reboot VMs
+══════════════════════════════════════════════════════════════
+  Reboot zfs-qos...
+Domain 'zfs-qos' is being rebooted
+
+  Reboot zfs-qos-bsd-qos...
+Domain 'zfs-qos-bsd-qos' is being rebooted
+
+
+
+  Attente SSH Linux VM...
+  Attente SSH FreeBSD VM...
+  [32mOK[0m   Les deux VMs sont up
+
+══════════════════════════════════════════════════════════════
+  Phase 3a — Setup Linux VM (zfs-qos)
+══════════════════════════════════════════════════════════════
+  [linux] Import pool testqos...
+  [32mOK[0m   [linux] Pool testqos importé
+  [linux] Vérification datasets...
+  [linux] NFS exports...
+  [32mOK[0m   [linux] NFS exports actifs
+  [linux] Samba...
+  [32mOK[0m   [linux] Samba actif
+  [linux] iSCSI targetcli...
+  [linux] Recréation iSCSI target...
+All configuration cleared
+Created block storage object iscsi1 using /dev/zvol/testqos/iscsi1.
+Created block storage object iscsi2 using /dev/zvol/testqos/iscsi2.
+Created block storage object iscsi3 using /dev/zvol/testqos/iscsi3.
+Created block storage object iscsi4 using /dev/zvol/testqos/iscsi4.
+Created block storage object iscsi5 using /dev/zvol/testqos/iscsi5.
+Created target iqn.2026-04.com.qos:bench.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+Created LUN 0.
+Created LUN 1.
+Created LUN 2.
+Created LUN 3.
+Created LUN 4.
+Parameter authentication is now '0'.
+Parameter demo_mode_write_protect is now '0'.
+Parameter generate_node_acls is now '1'.
+Deleted network portal 0.0.0.0:3260
+Using default IP port 3260
+Binding to INADDR_ANY (0.0.0.0)
+Created network portal 0.0.0.0:3260.
+Last 10 configs saved in /etc/rtslib-fb-target/backup/.
+Configuration saved to /etc/rtslib-fb-target/saveconfig.json
+  [32mOK[0m   [linux] iSCSI target recréé (6 LUNs)
+  [linux] NVMe-oF nvmet...
+  [32mOK[0m   [linux] NVMe-oF target OK (5 namespaces)
+
+══════════════════════════════════════════════════════════════
+  Phase 3b — Setup FreeBSD VM (zfs-bsd-qos)
+══════════════════════════════════════════════════════════════
+  [freebsd] Import pool testqos...
+  [32mOK[0m   [freebsd] Pool testqos déjà importé
+  [freebsd] Vérification datasets...
+  [freebsd] NFS...
+Stopping nfsd.
+Waiting for PIDS: 1300.
+NFS on reserved port only=YES
+Starting nfsd.
+  [32mOK[0m   [freebsd] NFS exports actifs
+  [freebsd] Samba...
+Performing sanity check on Samba configuration: OK
+Stopping smbd.
+Waiting for PIDS: 1325.
+Stopping nmbd.
+Waiting for PIDS: 1321.
+Performing sanity check on Samba configuration: OK
+Starting nmbd.
+Starting smbd.
+  [32mOK[0m   [freebsd] Samba actif
+  [freebsd] iSCSI ctld...
+  [32mOK[0m   [freebsd] iSCSI target OK (5 LUNs)
+  [freebsd] NVMe-oF ctld...
+LUN created successfully
+backend:       block
+device type:   0
+LUN size:      2147483648 bytes
+blocksize      512 bytes
+LUN ID:        5
+Serial Number: NVMEOF0000
+Device ID:     NVMEFID0000
+LUN created successfully
+backend:       block
+device type:   0
+LUN size:      2147483648 bytes
+blocksize      512 bytes
+LUN ID:        6
+Serial Number: NVMEOF0001
+Device ID:     NVMEFID0001
+LUN created successfully
+backend:       block
+device type:   0
+LUN size:      2147483648 bytes
+blocksize      512 bytes
+LUN ID:        7
+Serial Number: NVMEOF0002
+Device ID:     NVMEFID0002
+LUN created successfully
+backend:       block
+device type:   0
+LUN size:      2147483648 bytes
+blocksize      512 bytes
+LUN ID:        8
+Serial Number: NVMEOF0003
+Device ID:     NVMEFID0003
+LUN created successfully
+backend:       block
+device type:   0
+LUN size:      2147483648 bytes
+blocksize      512 bytes
+LUN ID:        9
+Serial Number: NVMEOF0004
+Device ID:     NVMEFID0004
+  [33mWARN[0m [freebsd] NVMe-oF port non créé — ce protocole sera skippé pour FreeBSD
+
+══════════════════════════════════════════════════════════════
+  Phase 4a — iSCSI connect
+══════════════════════════════════════════════════════════════
+  Discover + login Linux VM iSCSI...
+192.168.122.187:3260,1 iqn.2026-04.com.qos:bench
+Logging in to [iface: default, target: iqn.2026-04.com.qos:bench, portal: 192.168.122.187,3260]
+Login to [iface: default, target: iqn.2026-04.com.qos:bench, portal: 192.168.122.187,3260] successful.
+  Discover + login FreeBSD VM iSCSI...
+192.168.122.137:3260,-1 iqn.2026-04.local.zfs-qos-bsd:target0
+Logging in to [iface: default, target: iqn.2026-04.local.zfs-qos-bsd:target0, portal: 192.168.122.137,3260]
+Login to [iface: default, target: iqn.2026-04.local.zfs-qos-bsd:target0, portal: 192.168.122.137,3260] successful.
+  Attente devices SCSI...
+  [32mOK[0m   iSCSI: 10 devices SCSI détectés
+
+══════════════════════════════════════════════════════════════
+  Phase 4b — NVMe-oF connect
+══════════════════════════════════════════════════════════════
+  Connect Linux VM NVMe-oF...
+connecting to device: nvme2
+  Connect FreeBSD VM NVMe-oF...
+  Attente devices NVMe...
+  [32mOK[0m   NVMe-oF Linux: 5 namespaces
+/home/ubuntu/qos-tests/0-setup/full_setup.sh: line 508: [: 0
+0: integer expression expected
+  [33mWARN[0m NVMe-oF FreeBSD: 0
+0 namespaces (peut être non supporté)
+
+══════════════════════════════════════════════════════════════
+  Phase 4c — Mount NFS
+══════════════════════════════════════════════════════════════
+  [32mOK[0m   NFS Linux bench1 → /mnt/linux/nfs/1
+  [32mOK[0m   NFS Linux bench2 → /mnt/linux/nfs/2
+  [32mOK[0m   NFS Linux bench3 → /mnt/linux/nfs/3
+  [32mOK[0m   NFS Linux bench4 → /mnt/linux/nfs/4
+  [32mOK[0m   NFS Linux bench5 → /mnt/linux/nfs/5
+  [32mOK[0m   NFS BSD bench1 → /mnt/freebsd/nfs/1
+  [32mOK[0m   NFS BSD bench2 → /mnt/freebsd/nfs/2
+  [32mOK[0m   NFS BSD bench3 → /mnt/freebsd/nfs/3
+  [32mOK[0m   NFS BSD bench4 → /mnt/freebsd/nfs/4
+  [32mOK[0m   NFS BSD bench5 → /mnt/freebsd/nfs/5
+
+══════════════════════════════════════════════════════════════
+  Phase 4d — Mount CIFS
+══════════════════════════════════════════════════════════════
+  Setup credentials /root/.cifs-qos...
+  [32mOK[0m   CIFS Linux bench1 → /mnt/linux/cifs/1
+  [32mOK[0m   CIFS Linux bench2 → /mnt/linux/cifs/2
+  [32mOK[0m   CIFS Linux bench3 → /mnt/linux/cifs/3
+  [32mOK[0m   CIFS Linux bench4 → /mnt/linux/cifs/4
+  [32mOK[0m   CIFS Linux bench5 → /mnt/linux/cifs/5
+  [32mOK[0m   CIFS BSD bench1 → /mnt/freebsd/cifs/1
+/home/ubuntu/qos-tests/0-setup/full_setup.sh: line 631: 754187 Killed                  sudo mount.cifs "//$BSD_VM_HOST/bench$i" "$MNT_CIFS_BSD/$i" -o "$CIFS_MOUNT_OPTS" 2> /dev/null
+  [31mFAIL[0m CIFS BSD bench2 mount failed
+  [32mOK[0m   CIFS BSD bench3 → /mnt/freebsd/cifs/3
+  [32mOK[0m   CIFS BSD bench4 → /mnt/freebsd/cifs/4
+  [32mOK[0m   CIFS BSD bench5 → /mnt/freebsd/cifs/5
+
+══════════════════════════════════════════════════════════════
+  Phase 4e — Mount iSCSI
+══════════════════════════════════════════════════════════════
+  Mount iSCSI Linux par LUN...
+  [32mOK[0m   LUN 0 (/dev/sda) → /mnt/linux/iscsi/1
+  [32mOK[0m   LUN 1 (/dev/sdb) → /mnt/linux/iscsi/2
+  [32mOK[0m   LUN 2 (/dev/sdc) → /mnt/linux/iscsi/3
+  [32mOK[0m   LUN 3 (/dev/sdd) → /mnt/linux/iscsi/4
+  [32mOK[0m   LUN 4 (/dev/sde) → /mnt/linux/iscsi/5
+  [32mOK[0m   iSCSI Linux: 5/5 montés
+  Mount iSCSI FreeBSD par LUN...
+  [32mOK[0m   LUN 0 (/dev/sdf) → /mnt/freebsd/iscsi/1
+  [32mOK[0m   LUN 1 (/dev/sdg) → /mnt/freebsd/iscsi/2
+  [32mOK[0m   LUN 2 (/dev/sdh) → /mnt/freebsd/iscsi/3
+  [32mOK[0m   LUN 3 (/dev/sdi) → /mnt/freebsd/iscsi/4
+  [32mOK[0m   LUN 4 (/dev/sdj) → /mnt/freebsd/iscsi/5
+  [32mOK[0m   iSCSI FreeBSD: 5/5 montés
+
+══════════════════════════════════════════════════════════════
+  Phase 4f — Mount NVMe-oF
+══════════════════════════════════════════════════════════════
+  Mount NVMe-oF Linux par namespace...
+  [32mOK[0m   ns 1 (/dev/nvme2n1) → /mnt/linux/nvmeof/1
+  [32mOK[0m   ns 2 (/dev/nvme2n2) → /mnt/linux/nvmeof/2
+  [32mOK[0m   ns 3 (/dev/nvme2n3) → /mnt/linux/nvmeof/3
+  [32mOK[0m   ns 4 (/dev/nvme2n4) → /mnt/linux/nvmeof/4
+  [32mOK[0m   ns 5 (/dev/nvme2n5) → /mnt/linux/nvmeof/5
+  [32mOK[0m   NVMe-oF Linux: 5/5 montés
+  Mount NVMe-oF FreeBSD par namespace...
+  [33mWARN[0m NVMe-oF FreeBSD: aucun controller trouvé (model=FreeBSD)
+
+══════════════════════════════════════════════════════════════
+  Phase 5a — Seed .qos_id markers
+══════════════════════════════════════════════════════════════
+  [32mOK[0m   Markers LOCAL posés (Linux + FreeBSD VMs)
+  [32mOK[0m   Markers iSCSI posés
+  [32mOK[0m   Markers NVMe-oF posés
+
+══════════════════════════════════════════════════════════════
+  Phase 5b — Vérification complète
+══════════════════════════════════════════════════════════════
+
+  ── NFS ──
+  [32mPASS[0m [NFS-LNX] /mnt/linux/nfs/1 → testqos/bench1
+  [32mPASS[0m [NFS-BSD] /mnt/freebsd/nfs/1 → testqos/bench1
+  [32mPASS[0m [NFS-LNX] /mnt/linux/nfs/2 → testqos/bench2
+  [32mPASS[0m [NFS-BSD] /mnt/freebsd/nfs/2 → testqos/bench2
+  [32mPASS[0m [NFS-LNX] /mnt/linux/nfs/3 → testqos/bench3
+  [32mPASS[0m [NFS-BSD] /mnt/freebsd/nfs/3 → testqos/bench3
+  [32mPASS[0m [NFS-LNX] /mnt/linux/nfs/4 → testqos/bench4
+  [32mPASS[0m [NFS-BSD] /mnt/freebsd/nfs/4 → testqos/bench4
+  [32mPASS[0m [NFS-LNX] /mnt/linux/nfs/5 → testqos/bench5
+  [32mPASS[0m [NFS-BSD] /mnt/freebsd/nfs/5 → testqos/bench5
+  ── CIFS ──
+  [32mPASS[0m [CIFS-LNX] /mnt/linux/cifs/1 → testqos/bench1
+  [32mPASS[0m [CIFS-BSD] /mnt/freebsd/cifs/1 → testqos/bench1
+  [32mPASS[0m [CIFS-LNX] /mnt/linux/cifs/2 → testqos/bench2
+  [31mFAIL[0m [CIFS-BSD] /mnt/freebsd/cifs/2 non monté
+  [32mPASS[0m [CIFS-LNX] /mnt/linux/cifs/3 → testqos/bench3
+  [32mPASS[0m [CIFS-BSD] /mnt/freebsd/cifs/3 → testqos/bench3
+  [32mPASS[0m [CIFS-LNX] /mnt/linux/cifs/4 → testqos/bench4
+  [32mPASS[0m [CIFS-BSD] /mnt/freebsd/cifs/4 → testqos/bench4
+  [32mPASS[0m [CIFS-LNX] /mnt/linux/cifs/5 → testqos/bench5
+  [32mPASS[0m [CIFS-BSD] /mnt/freebsd/cifs/5 → testqos/bench5
+  ── iSCSI ──
+  [32mPASS[0m [iSCSI-LNX] /mnt/linux/iscsi/1 → testqos/iscsi1
+  [32mPASS[0m [iSCSI-BSD] /mnt/freebsd/iscsi/1 → testqos/iscsi1
+  [32mPASS[0m [iSCSI-LNX] /mnt/linux/iscsi/2 → testqos/iscsi2
+  [32mPASS[0m [iSCSI-BSD] /mnt/freebsd/iscsi/2 → testqos/iscsi2
+  [32mPASS[0m [iSCSI-LNX] /mnt/linux/iscsi/3 → testqos/iscsi3
+  [32mPASS[0m [iSCSI-BSD] /mnt/freebsd/iscsi/3 → testqos/iscsi3
+  [32mPASS[0m [iSCSI-LNX] /mnt/linux/iscsi/4 → testqos/iscsi4
+  [32mPASS[0m [iSCSI-BSD] /mnt/freebsd/iscsi/4 → testqos/iscsi4
+  [32mPASS[0m [iSCSI-LNX] /mnt/linux/iscsi/5 → testqos/iscsi5
+  [32mPASS[0m [iSCSI-BSD] /mnt/freebsd/iscsi/5 → testqos/iscsi5
+  ── NVMe-oF ──
+  [32mPASS[0m [NVMe-LNX] /mnt/linux/nvmeof/1 → testqos/nvme1
+  [31mFAIL[0m [NVMe-BSD] /mnt/freebsd/nvmeof/1 non monté
+  [32mPASS[0m [NVMe-LNX] /mnt/linux/nvmeof/2 → testqos/nvme2
+  [31mFAIL[0m [NVMe-BSD] /mnt/freebsd/nvmeof/2 non monté
+  [32mPASS[0m [NVMe-LNX] /mnt/linux/nvmeof/3 → testqos/nvme3
+  [31mFAIL[0m [NVMe-BSD] /mnt/freebsd/nvmeof/3 non monté
+  [32mPASS[0m [NVMe-LNX] /mnt/linux/nvmeof/4 → testqos/nvme4
+  [31mFAIL[0m [NVMe-BSD] /mnt/freebsd/nvmeof/4 non monté
+  [32mPASS[0m [NVMe-LNX] /mnt/linux/nvmeof/5 → testqos/nvme5
+  [31mFAIL[0m [NVMe-BSD] /mnt/freebsd/nvmeof/5 non monté
+  ── LOCAL (via SSH) ──
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench1
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench1
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench2
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench2
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench3
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench3
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench4
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench4
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench5
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench5
+
+
+══════════════════════════════════════════════════════════════
+  RÉSULTAT: 44 PASS / 6 FAIL (total 50)
+══════════════════════════════════════════════════════════════
+  [31m6 PROBLÈMES DÉTECTÉS[0m
+
+
+══════════════════════════════════════════════════════════════
+  SETUP TERMINÉ — Sun Apr 19 10:50:30 UTC 2026
+══════════════════════════════════════════════════════════════
+  [33m1 erreurs rencontrées (voir ci-dessus)[0m
+
+[31mSETUP FAILED — certains protocoles peuvent ne pas fonctionner[0m
+Continuation malgré les erreurs...
+
+══════════════════════════════════════════════════════════════
+  PHASE 2 — Tests s1
+══════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━ 1/10 LOCAL BSD ━━━━━━━━━━━━━━━
+  Coherence check LOCAL BSD...
+  [32mOK[0m LOCAL BSD prêt
+
+==============================================
+=== [local-bsd-s1_local] START Sun Apr 19 10:50:30 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 local — Solo : 5 datasets, caps 5 10 20 40 80, axes a/b/c/d(info)/e, fio VM-side
+════════════════════════════════════════════════════════════════
+
+─────────── S1L bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.1.a][0m bench1 cap=5 READ direct VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1L.1.b][0m bench1 cap=5 READ indirect VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1L.1.c][0m bench1 cap=5 WRITE direct VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1L.1.d][0m bench1 cap=5 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only)
+
+[36m[S1L.1.e][0m bench1 cap=5 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.1.e] cap=5 MB/s | R_sum=5.1 (ra=2.4 rb=2.7) | W_sum=5.9 (wc=2.7 wd=3.2)
+
+─────────── S1L bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.2.a][0m bench2 cap=10 READ direct VM, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1L.2.b][0m bench2 cap=10 READ indirect VM, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1L.2.c][0m bench2 cap=10 WRITE direct VM, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1L.2.d][0m bench2 cap=10 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.2.d] measured=10.1 MB/s (cap=10, indirect write — INFO only)
+
+[36m[S1L.2.e][0m bench2 cap=10 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.2.e] cap=10 MB/s | R_sum=10.2 (ra=5.2 rb=5.0) | W_sum=11.7 (wc=5.0 wd=6.7)
+
+─────────── S1L bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.3.a][0m bench3 cap=20 READ direct VM, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1L.3.b][0m bench3 cap=20 READ indirect VM, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1L.3.c][0m bench3 cap=20 WRITE direct VM, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1L.3.d][0m bench3 cap=20 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.3.d] measured=20.2 MB/s (cap=20, indirect write — INFO only)
+
+[36m[S1L.3.e][0m bench3 cap=20 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.3.e] cap=20 MB/s | R_sum=20.6 (ra=10.5 rb=10.1) | W_sum=23.5 (wc=10.0 wd=13.5)
+
+─────────── S1L bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.4.a][0m bench4 cap=40 READ direct VM, 60s
+  measured : 40.9 MB/s
+  [32mPASS[0m measured=40.9 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1L.4.b][0m bench4 cap=40 READ indirect VM, 60s
+  measured : 40.6 MB/s
+  [32mPASS[0m measured=40.6 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1L.4.c][0m bench4 cap=40 WRITE direct VM, 60s
+  measured : 40.6 MB/s
+  [32mPASS[0m measured=40.6 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1L.4.d][0m bench4 cap=40 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.4.d] measured=40.4 MB/s (cap=40, indirect write — INFO only)
+
+[36m[S1L.4.e][0m bench4 cap=40 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.4.e] cap=40 MB/s | R_sum=41.0 (ra=20.7 rb=20.3) | W_sum=47.3 (wc=20.9 wd=26.4)
+
+─────────── S1L bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.5.a][0m bench5 cap=80 READ direct VM, 60s
+  measured : 81.8 MB/s
+  [32mPASS[0m measured=81.8 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1L.5.b][0m bench5 cap=80 READ indirect VM, 60s
+  measured : 81.2 MB/s
+  [32mPASS[0m measured=81.2 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1L.5.c][0m bench5 cap=80 WRITE direct VM, 60s
+  measured : 81.1 MB/s
+  [32mPASS[0m measured=81.1 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1L.5.d][0m bench5 cap=80 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.5.d] measured=80.5 MB/s (cap=80, indirect write — INFO only)
+
+[36m[S1L.5.e][0m bench5 cap=80 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.5.e] cap=80 MB/s | R_sum=82.2 (ra=39.5 rb=42.7) | W_sum=94.3 (wc=40.5 wd=53.8)
+
+Suite S1 local — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [local-bsd-s1_local] DONE rc=0 Sun Apr 19 11:23:34 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 11:23:34 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 2/10 LOCAL LINUX ━━━━━━━━━━━━━━━
+  Coherence check LOCAL Linux...
+  [32mOK[0m LOCAL Linux prêt
+
+==============================================
+=== [local-lnx-s1_local] START Sun Apr 19 11:23:56 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 local — Solo : 5 datasets, caps 5 10 20 40 80, axes a/b/c/d(info)/e, fio VM-side
+════════════════════════════════════════════════════════════════
+
+─────────── S1L bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.1.a][0m bench1 cap=5 READ direct VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1L.1.b][0m bench1 cap=5 READ indirect VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1L.1.c][0m bench1 cap=5 WRITE direct VM, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1L.1.d][0m bench1 cap=5 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only)
+
+[36m[S1L.1.e][0m bench1 cap=5 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.1.e] cap=5 MB/s | R_sum=5.1 (ra=2.8 rb=2.3) | W_sum=5.4 (wc=1.0 wd=4.4)
+
+─────────── S1L bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.2.a][0m bench2 cap=10 READ direct VM, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1L.2.b][0m bench2 cap=10 READ indirect VM, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1L.2.c][0m bench2 cap=10 WRITE direct VM, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1L.2.d][0m bench2 cap=10 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.2.d] measured=10.1 MB/s (cap=10, indirect write — INFO only)
+
+[36m[S1L.2.e][0m bench2 cap=10 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.2.e] cap=10 MB/s | R_sum=10.3 (ra=4.9 rb=5.4) | W_sum=11.1 (wc=3.1 wd=8.0)
+
+─────────── S1L bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.3.a][0m bench3 cap=20 READ direct VM, 60s
+  measured : 20.5 MB/s
+  [32mPASS[0m measured=20.5 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1L.3.b][0m bench3 cap=20 READ indirect VM, 60s
+  measured : 20.5 MB/s
+  [32mPASS[0m measured=20.5 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1L.3.c][0m bench3 cap=20 WRITE direct VM, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1L.3.d][0m bench3 cap=20 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.3.d] measured=20.2 MB/s (cap=20, indirect write — INFO only)
+
+[36m[S1L.3.e][0m bench3 cap=20 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.3.e] cap=20 MB/s | R_sum=20.4 (ra=9.7 rb=10.7) | W_sum=22.2 (wc=6.0 wd=16.2)
+
+─────────── S1L bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.4.a][0m bench4 cap=40 READ direct VM, 60s
+  measured : 40.9 MB/s
+  [32mPASS[0m measured=40.9 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1L.4.b][0m bench4 cap=40 READ indirect VM, 60s
+  measured : 41.1 MB/s
+  [32mPASS[0m measured=41.1 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1L.4.c][0m bench4 cap=40 WRITE direct VM, 60s
+  measured : 40.6 MB/s
+  [32mPASS[0m measured=40.6 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1L.4.d][0m bench4 cap=40 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.4.d] measured=40.5 MB/s (cap=40, indirect write — INFO only)
+
+[36m[S1L.4.e][0m bench4 cap=40 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.4.e] cap=40 MB/s | R_sum=41.1 (ra=19.1 rb=22.0) | W_sum=47.5 (wc=20.5 wd=27.0)
+
+─────────── S1L bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1L.5.a][0m bench5 cap=80 READ direct VM, 60s
+  measured : 81.9 MB/s
+  [32mPASS[0m measured=81.9 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1L.5.b][0m bench5 cap=80 READ indirect VM, 60s
+  measured : 82.2 MB/s
+  [32mPASS[0m measured=82.2 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1L.5.c][0m bench5 cap=80 WRITE direct VM, 60s
+  measured : 81.3 MB/s
+  [32mPASS[0m measured=81.3 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1L.5.d][0m bench5 cap=80 WRITE indirect VM, 60s
+  [33mINFO[0m [S1L.5.d] measured=80.9 MB/s (cap=80, indirect write — INFO only)
+
+[36m[S1L.5.e][0m bench5 cap=80 abcd parallèle VM (4 workers), 60s
+  [33mINFO[0m [S1L.5.e] cap=80 MB/s | R_sum=81.3 (ra=44.3 rb=37.0) | W_sum=92.5 (wc=35.1 wd=57.4)
+
+Suite S1 local — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [local-lnx-s1_local] DONE rc=0 Sun Apr 19 11:57:08 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 11:57:08 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 3/10 NFS BSD ━━━━━━━━━━━━━━━
+  Coherence check nfs-bsd...
+  [32mOK[0m nfs-bsd prêt
+
+==============================================
+=== [nfs-bsd-s1_v2] START Sun Apr 19 11:57:30 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.0 MB/s
+  [32mPASS[0m measured=5.0 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5.6 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=1.6 (ra=0.7 rb=0.9) | W_sum=6.0 (wc=0.6 wd=5.4)
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=7.1 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=3.3 (ra=1.2 rb=2.1) | W_sum=7.5 (wc=0.4 wd=7.1)
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 20.1 MB/s
+  [32mPASS[0m measured=20.1 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.1 MB/s
+  [32mPASS[0m measured=20.1 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=12.9 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=16.5 (ra=6.6 rb=9.9) | W_sum=13.4 (wc=2.0 wd=11.4)
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 40.2 MB/s
+  [32mPASS[0m measured=40.2 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.2 MB/s
+  [32mPASS[0m measured=40.2 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=38.0 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=35.6 (ra=14.1 rb=21.5) | W_sum=37.6 (wc=12.5 wd=25.1)
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 80.5 MB/s
+  [32mPASS[0m measured=80.5 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 80.2 MB/s
+  [32mPASS[0m measured=80.2 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=79.6 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=82.0 (ra=32.0 rb=50.0) | W_sum=92.7 (wc=37.6 wd=55.1)
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [nfs-bsd-s1_v2] DONE rc=0 Sun Apr 19 12:32:38 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 12:32:38 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 4/10 NFS LINUX ━━━━━━━━━━━━━━━
+  Coherence check nfs-lnx...
+  [32mOK[0m nfs-lnx prêt
+
+==============================================
+=== [nfs-lnx-s1_v2] START Sun Apr 19 12:33:00 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 5.0 MB/s
+  [32mPASS[0m measured=5.0 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.0 MB/s
+  [32mPASS[0m measured=5.0 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=2.3 (ra=0.8 rb=1.5) | W_sum=5.9 (wc=1.8 wd=4.1)
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=10.0 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=4.8 (ra=2.0 rb=2.8) | W_sum=11.5 (wc=3.4 wd=8.1)
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 20.2 MB/s
+  [32mPASS[0m measured=20.2 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.2 MB/s
+  [32mPASS[0m measured=20.2 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=20.1 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=8.2 (ra=3.4 rb=4.8) | W_sum=21.5 (wc=4.1 wd=17.4)
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.9 MB/s
+  [32mPASS[0m measured=40.9 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 40.4 MB/s
+  [32mPASS[0m measured=40.4 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=40.0 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=21.4 (ra=6.7 rb=14.7) | W_sum=42.2 (wc=5.3 wd=36.9)
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 80.8 MB/s
+  [32mPASS[0m measured=80.8 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 81.0 MB/s
+  [32mPASS[0m measured=81.0 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=80.2 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=65.6 (ra=19.9 rb=45.7) | W_sum=83.1 (wc=7.5 wd=75.6)
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [nfs-lnx-s1_v2] DONE rc=0 Sun Apr 19 13:07:41 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 13:07:41 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 5/10 CIFS BSD ━━━━━━━━━━━━━━━
+  Coherence check cifs-bsd...
+  [32mOK[0m cifs-bsd prêt
+
+==============================================
+=== [cifs-bsd-s1_v2] START Sun Apr 19 13:08:03 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 3.8 MB/s
+  [32mPASS[0m measured=3.8 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5647.0 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=2.9 (ra=1.9 rb=1.0) | W_sum=5879.3 (wc=1.7 wd=5877.6)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 8.3 MB/s
+  [32mPASS[0m measured=8.3 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=7383.6 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=8.9 (ra=6.8 rb=2.1) | W_sum=7259.8 (wc=6.8 wd=7253.0)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 19.6 MB/s
+  [32mPASS[0m measured=19.6 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=7155.3 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=20.3 (ra=17.1 rb=3.2) | W_sum=8357.5 (wc=16.8 wd=8340.7)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 38.3 MB/s
+  [32mPASS[0m measured=38.3 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=7389.6 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=40.9 (ra=36.9 rb=4.0) | W_sum=8742.9 (wc=36.9 wd=8706.0)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 73.6 MB/s
+  [32mPASS[0m measured=73.6 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 80.9 MB/s
+  [32mPASS[0m measured=80.9 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=7176.3 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=81.9 (ra=76.9 rb=5.0) | W_sum=6744.1 (wc=76.7 wd=6667.4)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [cifs-bsd-s1_v2] DONE rc=0 Sun Apr 19 13:44:50 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 13:44:50 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 6/10 CIFS LINUX ━━━━━━━━━━━━━━━
+  Coherence check cifs-lnx...
+  [32mOK[0m cifs-lnx prêt
+
+==============================================
+=== [cifs-lnx-s1_v2] START Sun Apr 19 13:45:12 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 4.7 MB/s
+  [32mPASS[0m measured=4.7 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5674.8 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=7.4 (ra=5.1 rb=2.3) | W_sum=6600.9 (wc=4.8 wd=6596.1)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 9.7 MB/s
+  [32mPASS[0m measured=9.7 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=6325.0 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=12.6 (ra=10.1 rb=2.5) | W_sum=7719.0 (wc=9.9 wd=7709.1)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 19.9 MB/s
+  [32mPASS[0m measured=19.9 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.2 MB/s
+  [32mPASS[0m measured=20.2 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=7198.3 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=23.0 (ra=20.1 rb=2.9) | W_sum=8018.4 (wc=20.0 wd=7998.4)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 40.2 MB/s
+  [32mPASS[0m measured=40.2 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=7306.8 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=43.3 (ra=40.1 rb=3.2) | W_sum=8313.8 (wc=39.9 wd=8273.9)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 80.5 MB/s
+  [32mPASS[0m measured=80.5 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 81.2 MB/s
+  [32mPASS[0m measured=81.2 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=7233.5 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=83.3 (ra=79.9 rb=3.4) | W_sum=8743.8 (wc=80.1 wd=8663.7)
+    [31mWARN[0m axe e > 2.5× cap — QoS peut ne pas throttler ou cache client inflate
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [cifs-lnx-s1_v2] DONE rc=0 Sun Apr 19 14:21:04 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 14:21:04 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 7/10 iSCSI BSD ━━━━━━━━━━━━━━━
+  Coherence check iscsi-bsd...
+  [32mOK[0m iSCSI mount order verified for /mnt/freebsd/iscsi (host=33)
+    LUN 0 (/dev/sdf) → /mnt/freebsd/iscsi/1
+    LUN 1 (/dev/sdg) → /mnt/freebsd/iscsi/2
+    LUN 2 (/dev/sdh) → /mnt/freebsd/iscsi/3
+    LUN 3 (/dev/sdi) → /mnt/freebsd/iscsi/4
+    LUN 4 (/dev/sdj) → /mnt/freebsd/iscsi/5
+  [32mOK[0m iscsi-bsd prêt
+
+==============================================
+=== [iscsi-bsd-s1_v2] START Sun Apr 19 14:21:26 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 4.9 MB/s
+  [32mPASS[0m measured=4.9 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=5.0 (ra=1.0 rb=4.0) | W_sum=6.0 (wc=2.3 wd=3.7)
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 10.0 MB/s
+  [32mPASS[0m measured=10.0 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=10.0 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=10.1 (ra=2.1 rb=8.0) | W_sum=12.1 (wc=4.9 wd=7.2)
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 20.0 MB/s
+  [32mPASS[0m measured=20.0 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=20.0 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=20.4 (ra=4.7 rb=15.7) | W_sum=23.7 (wc=9.8 wd=13.9)
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 40.2 MB/s
+  [32mPASS[0m measured=40.2 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=40.2 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=40.9 (ra=9.3 rb=31.6) | W_sum=46.5 (wc=19.0 wd=27.5)
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 80.4 MB/s
+  [32mPASS[0m measured=80.4 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 81.0 MB/s
+  [32mPASS[0m measured=81.0 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=80.2 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=81.9 (ra=23.4 rb=58.5) | W_sum=93.9 (wc=39.5 wd=54.4)
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [iscsi-bsd-s1_v2] DONE rc=0 Sun Apr 19 14:55:34 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 14:55:34 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 8/10 iSCSI LINUX ━━━━━━━━━━━━━━━
+  Coherence check iscsi-lnx...
+  [32mOK[0m iSCSI mount order verified for /mnt/linux/iscsi (host=32)
+    LUN 0 (/dev/sda) → /mnt/linux/iscsi/1
+    LUN 1 (/dev/sdb) → /mnt/linux/iscsi/2
+    LUN 2 (/dev/sdc) → /mnt/linux/iscsi/3
+    LUN 3 (/dev/sdd) → /mnt/linux/iscsi/4
+    LUN 4 (/dev/sde) → /mnt/linux/iscsi/5
+  [32mOK[0m iscsi-lnx prêt
+
+==============================================
+=== [iscsi-lnx-s1_v2] START Sun Apr 19 14:55:56 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 5.0 MB/s
+  [32mPASS[0m measured=5.0 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.0 MB/s
+  [32mPASS[0m measured=5.0 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=5.1 (ra=2.2 rb=2.9) | W_sum=6.1 (wc=2.6 wd=3.5)
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=10.0 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=10.1 (ra=5.1 rb=5.0) | W_sum=12.9 (wc=7.1 wd=5.8)
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 20.2 MB/s
+  [32mPASS[0m measured=20.2 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.2 MB/s
+  [32mPASS[0m measured=20.2 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=20.1 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=20.4 (ra=8.8 rb=11.6) | W_sum=24.1 (wc=10.3 wd=13.8)
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 40.4 MB/s
+  [32mPASS[0m measured=40.4 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=40.3 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=41.0 (ra=17.3 rb=23.7) | W_sum=47.6 (wc=20.9 wd=26.7)
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (192M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 81.0 MB/s
+  [32mPASS[0m measured=81.0 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 81.2 MB/s
+  [32mPASS[0m measured=81.2 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=80.4 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=82.0 (ra=34.3 rb=47.7) | W_sum=98.7 (wc=52.5 wd=46.2)
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [iscsi-lnx-s1_v2] DONE rc=0 Sun Apr 19 15:30:06 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 15:30:06 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+━━━━━━━━━━━━━━━ 9/10 NVMe-oF BSD ━━━━━━━━━━━━━━━
+  [33mSKIP[0m NVMe-oF BSD — mounts non disponibles
+
+━━━━━━━━━━━━━━━ 10/10 NVMe-oF LINUX ━━━━━━━━━━━━━━━
+  Coherence check nvmeof-lnx...
+  [32mOK[0m nvmeof-lnx prêt
+
+==============================================
+=== [nvmeof-lnx-s1_v2] START Sun Apr 19 15:30:28 UTC 2026 ===
+==============================================
+
+════════════════════════════════════════════════════════════════
+  S1 v2 — Solo : 5 datasets, caps 10/25/50/100/200, axes a/b/c/d/e, boost=0
+════════════════════════════════════════════════════════════════
+
+─────────── S1 bench1 — cap=5 MB/s ───────────
+  seeding bench_r (128M)...
+
+[36m[S1.1.a][0m bench1 cap=5 READ direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.b][0m bench1 cap=5 READ indirect, 60s
+  measured : 4.2 MB/s
+  [32mPASS[0m measured=4.2 MB/s expected=5 ±40% [3.00..7.00]
+
+[36m[S1.1.c][0m bench1 cap=5 WRITE direct, 60s
+  measured : 5.1 MB/s
+  [32mPASS[0m measured=5.1 MB/s expected=5 ±25% [3.75..6.25]
+
+[36m[S1.1.d][0m bench1 cap=5 WRITE indirect, 60s
+  [33mINFO[0m [S1.1.d] measured=5.0 MB/s (cap=5, indirect write — INFO only, no assertion)
+
+[36m[S1.1.e][0m bench1 cap=5 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.1.e] cap=5 MB/s | R_sum=4.5 (ra=0.5 rb=4.0) | W_sum=4.2 (wc=0.9 wd=3.3)
+
+─────────── S1 bench2 — cap=10 MB/s ───────────
+  seeding bench_r (128M)...
+
+[36m[S1.2.a][0m bench2 cap=10 READ direct, 60s
+  measured : 10.2 MB/s
+  [32mPASS[0m measured=10.2 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.b][0m bench2 cap=10 READ indirect, 60s
+  measured : 8.6 MB/s
+  [32mPASS[0m measured=8.6 MB/s expected=10 ±40% [6.00..14.00]
+
+[36m[S1.2.c][0m bench2 cap=10 WRITE direct, 60s
+  measured : 10.1 MB/s
+  [32mPASS[0m measured=10.1 MB/s expected=10 ±25% [7.50..12.50]
+
+[36m[S1.2.d][0m bench2 cap=10 WRITE indirect, 60s
+  [33mINFO[0m [S1.2.d] measured=10.0 MB/s (cap=10, indirect write — INFO only, no assertion)
+
+[36m[S1.2.e][0m bench2 cap=10 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.2.e] cap=10 MB/s | R_sum=9.4 (ra=2.9 rb=6.5) | W_sum=10.0 (wc=3.3 wd=6.7)
+
+─────────── S1 bench3 — cap=20 MB/s ───────────
+  seeding bench_r (128M)...
+
+[36m[S1.3.a][0m bench3 cap=20 READ direct, 60s
+  measured : 20.4 MB/s
+  [32mPASS[0m measured=20.4 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.b][0m bench3 cap=20 READ indirect, 60s
+  measured : 17.9 MB/s
+  [32mPASS[0m measured=17.9 MB/s expected=20 ±40% [12.00..28.00]
+
+[36m[S1.3.c][0m bench3 cap=20 WRITE direct, 60s
+  measured : 20.3 MB/s
+  [32mPASS[0m measured=20.3 MB/s expected=20 ±25% [15.00..25.00]
+
+[36m[S1.3.d][0m bench3 cap=20 WRITE indirect, 60s
+  [33mINFO[0m [S1.3.d] measured=20.1 MB/s (cap=20, indirect write — INFO only, no assertion)
+
+[36m[S1.3.e][0m bench3 cap=20 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.3.e] cap=20 MB/s | R_sum=18.3 (ra=11.5 rb=6.8) | W_sum=21.1 (wc=4.8 wd=16.3)
+
+─────────── S1 bench4 — cap=40 MB/s ───────────
+  seeding bench_r (128M)...
+
+[36m[S1.4.a][0m bench4 cap=40 READ direct, 60s
+  measured : 40.8 MB/s
+  [32mPASS[0m measured=40.8 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.b][0m bench4 cap=40 READ indirect, 60s
+  measured : 38.9 MB/s
+  [32mPASS[0m measured=38.9 MB/s expected=40 ±40% [24.00..56.00]
+
+[36m[S1.4.c][0m bench4 cap=40 WRITE direct, 60s
+  measured : 40.5 MB/s
+  [32mPASS[0m measured=40.5 MB/s expected=40 ±25% [30.00..50.00]
+
+[36m[S1.4.d][0m bench4 cap=40 WRITE indirect, 60s
+  [33mINFO[0m [S1.4.d] measured=40.3 MB/s (cap=40, indirect write — INFO only, no assertion)
+
+[36m[S1.4.e][0m bench4 cap=40 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.4.e] cap=40 MB/s | R_sum=38.9 (ra=15.0 rb=23.9) | W_sum=49.2 (wc=27.1 wd=22.1)
+
+─────────── S1 bench5 — cap=80 MB/s ───────────
+  seeding bench_r (128M)...
+
+[36m[S1.5.a][0m bench5 cap=80 READ direct, 60s
+  measured : 81.7 MB/s
+  [32mPASS[0m measured=81.7 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.b][0m bench5 cap=80 READ indirect, 60s
+  measured : 79.0 MB/s
+  [32mPASS[0m measured=79.0 MB/s expected=80 ±40% [48.00..112.00]
+
+[36m[S1.5.c][0m bench5 cap=80 WRITE direct, 60s
+  measured : 81.3 MB/s
+  [32mPASS[0m measured=81.3 MB/s expected=80 ±25% [60.00..100.00]
+
+[36m[S1.5.d][0m bench5 cap=80 WRITE indirect, 60s
+  [33mINFO[0m [S1.5.d] measured=80.5 MB/s (cap=80, indirect write — INFO only, no assertion)
+
+[36m[S1.5.e][0m bench5 cap=80 abcd parallèle (4 workers), 60s
+  [33mINFO[0m [S1.5.e] cap=80 MB/s | R_sum=80.4 (ra=31.3 rb=49.1) | W_sum=100.1 (wc=56.7 wd=43.4)
+
+Suite S1 v2 — terminée : [32m15 PASS[0m / [31m0 FAIL[0m
+=== [nvmeof-lnx-s1_v2] DONE rc=0 Sun Apr 19 16:04:37 UTC 2026 ===
+>>> cleanup_between Sun Apr 19 16:04:37 UTC 2026
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+/home/ubuntu/qos-tests/0-setup/chain_full.sh: line 59: [: 0
+0: integer expression expected
+
+══════════════════════════════════════════════════════════════
+  RÉSUMÉ FINAL — Sun Apr 19 16:05:00 UTC 2026
+══════════════════════════════════════════════════════════════
+
+  Protocole                 Résultat
+  ───────────────────────── ──────────
+  CIFS-BSD-s1_v2            15P/0F
+  CIFS-LNX-s1_v2            15P/0F
+  LOCAL-BSD-s1_local        15P/0F
+  LOCAL-LNX-s1_local        15P/0F
+  NFS-BSD-s1_v2             15P/0F
+  NFS-LNX-s1_v2             15P/0F
+  NVMe-BSD                  SKIP
+  NVMe-LNX-s1_v2            15P/0F
+  iSCSI-BSD-s1_v2           15P/0F
+  iSCSI-LNX-s1_v2           15P/0F
+
+  TOTAL: [32m135 PASS[0m / [31m0 FAIL[0m
+
+  Log: /home/ubuntu/zfs-qos-241/results/chain_full_20260419_104655.log
+  Finished: Sun Apr 19 16:05:00 UTC 2026
