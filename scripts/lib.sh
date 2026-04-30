@@ -18,7 +18,17 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 # ─── Logging ──────────────────────────────────────────────────────────
-log() { echo "$@" | tee -a "$LOG"; }
+# When a parent shell redirects stdout to `tee -a "$LOG"` (as chain/rerun
+# wrappers do with `exec > >(tee -a "$LOG")`), the tee inside `log()` writes a
+# second copy of every line to $LOG. Set LOG_TEE_EXTERNAL=1 in those wrappers
+# to skip the inner tee.
+log() {
+    if [ "${LOG_TEE_EXTERNAL:-0}" = "1" ] || [ -z "${LOG:-}" ]; then
+        echo "$@"
+    else
+        echo "$@" | tee -a "$LOG"
+    fi
+}
 
 banner() {
     log ""
@@ -294,7 +304,10 @@ preflight_coherence() {
         local marker
         marker=$(sudo cat "$mnt/.qos_id" 2>/dev/null | tr -d '[:space:]')
         if [[ -z "$marker" ]]; then
-            log "  ${YEL}COHERENCE WARN${RST} $mnt — pas de marker .qos_id"
+            # Empty marker means the expected dataset isn't actually mounted here
+            # (e.g. host filesystem is mounted instead). Trust nothing — fail.
+            log "  ${RED}COHERENCE FAIL${RST} $mnt — pas de marker .qos_id (attendu=$expected)"
+            ok=0
         elif [[ "$marker" != "$expected" ]]; then
             log "  ${RED}COHERENCE FAIL${RST} $mnt → marker=$marker attendu=$expected"
             ok=0
@@ -321,7 +334,8 @@ preflight_coherence_local() {
         local marker
         marker=$($SSH "cat $mnt/.qos_id 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
         if [[ -z "$marker" ]]; then
-            log "  ${YEL}COHERENCE WARN${RST} VM:$mnt — pas de marker"
+            log "  ${RED}COHERENCE FAIL${RST} VM:$mnt — pas de marker (attendu=$ds)"
+            ok=0
         elif [[ "$marker" != "$ds" ]]; then
             log "  ${RED}COHERENCE FAIL${RST} VM:$mnt → marker=$marker attendu=$ds"
             ok=0

@@ -122,8 +122,14 @@ typedef struct dsl_pool {
 	/* QoS Boost: per-pool active bucket list (patch08) */
 	list_t		dp_qos_active_buckets;
 	kmutex_t	dp_qos_active_lock;
-	boolean_t	dp_qos_on_active_pools;	/* member of qos_active_pools */
-	list_node_t	dp_qos_active_node;	/* node in qos_active_pools */
+	/* X-patch16: per-pool wake thread (replaces global qos_active_pools) */
+	kthread_t	*dp_qos_wake_thr;
+	kcondvar_t	dp_qos_wake_cv;
+	kmutex_t	dp_qos_wake_lock;
+	boolean_t	dp_qos_wake_running;
+	uint64_t	dp_qos_wake_idle_cycles;   /* hysteresis (cf. patch U) */
+	int		dp_qos_wake_mode;          /* 0=idle, 1=actif */
+	hrtime_t	dp_qos_wake_last_time;     /* X-patch16 c3: per-pool cadence */
 	/* QoS Boost: persistent surplus pool (fix v3) */
 	int64_t		dp_qos_surplus_bw_read;
 	int64_t		dp_qos_surplus_bw_write;

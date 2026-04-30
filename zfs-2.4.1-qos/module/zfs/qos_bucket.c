@@ -32,22 +32,64 @@
 
 /*
  * Global state for the QoS wake thread.
+ *
+ * X-patch16: the wake thread is now per-pool (one thread per dsl_pool_t).
+ * The global qos_active_pools list, its lock, the global CV and exit flag
+ * have been retired.  Diagnostic kstats are still global — the wake-mode /
+ * idle-cycles counters therefore report the aggregate across all pools,
+ * which is an acceptable approximation for the kstat consumer.
  */
-/* QoS Boost: per-pool active list (patch08) — not static, extern in header */
-kmutex_t		qos_active_pools_lock;
-list_t			qos_active_pools;	/* list of dsl_pool_t */
-static kcondvar_t	qos_wake_cv;
-static boolean_t	qos_wake_exit;
-static kthread_t	*qos_wake_thr;
-
-/* Track actual wall-clock elapsed between wake cycles. */
-static hrtime_t qos_wake_last_time = 0;
+/* X-patch16 cycle 3: per-pool wake cadence.  The previous file-scope
+ * static would be written concurrently by N per-pool wake threads,
+ * producing a bogus wake_elapsed_ms (which drives boost-refill scaling).
+ * The tracker now lives in dsl_pool_t::dp_qos_wake_last_time, so each
+ * pool's cadence is computed independently. */
 
 /* Diagnostic kstats for boost wake thread. */
 static uint64_t qos_kstat_surplus_collected  = 0;
 static uint64_t qos_kstat_surplus_distributed = 0;
 static uint64_t qos_kstat_active_buckets_seen = 0;
 static uint64_t qos_kstat_idle_donors_seen   = 0;
+/* U-patch13: new diagnostic counters */
+static uint64_t qos_kstat_signaled_early     = 0;
+/*
+ * X-patch16 cycle 4: atomic aggregation of previously-racing kstats.
+ *   qos_kstat_idle_cycles_total — cumulative idle cycles across all
+ *     per-pool wake threads (was qwk_idle_cycles_total.value.ui64++ which
+ *     is a non-atomic RMW raced between N threads, losing increments).
+ *   qos_kstat_pools_active — count of pools currently in active mode
+ *     (was qwk_wake_mode = 0/1 written by each thread, last-writer-wins
+ *     across unrelated pools; semantically broken in per-pool world).
+ *   Both are incremented/decremented via atomic_add_64; the kstat slots
+ *   are published (non-atomically) by each wake thread — safe because
+ *   the source values are monotonic / eventually-consistent and every
+ *   publisher reads the same atomic source.
+ */
+static uint64_t qos_kstat_idle_cycles_total  = 0;
+static uint64_t qos_kstat_pools_active       = 0;
+/* W-patch15: ZIL throttle counter — exported to zil.c via qos_bucket.h. */
+uint64_t qos_zil_waited_total = 0;
+/*
+ * Z-patch18 cycle 1: diagnostic counters for the O_DIRECT BW-bypass
+ * investigation (see prompts/357-openzfs-qos/357-357-memory.md).
+ *   consume_called_write       — qos_bucket_try_consume(WRITE, >0) entries
+ *                                past the fast-path  (H1 probe).
+ *   consume_iops_only_write    — qos_bucket_try_consume(WRITE, 0) entries
+ *                                (H2 probe: W-patch15 ZIL IOPS-only path).
+ *   fastpath_hit_write         — qb_enabled=FALSE fast-path exits for WRITE
+ *                                (H4 probe: disable race).
+ *   tx_objset_null_writes      — dmu_tx_try_assign() saw tx_objset==NULL
+ *                                while towrite>0; the BW hook is skipped
+ *                                (H5 probe: exported, incremented from
+ *                                dmu_tx.c via the extern in qos_bucket.h).
+ * All are observed through /proc/spl/kstat/zfs/qos-boost-wake; the
+ * mutations are atomic_add_64 and the kstat publication reads are
+ * relaxed — we need counter monotonicity, not a consistent snapshot.
+ */
+static uint64_t qos_kstat_consume_called_write    = 0;
+static uint64_t qos_kstat_consume_iops_only_write = 0;
+static uint64_t qos_kstat_fastpath_hit_write      = 0;
+uint64_t        qos_kstat_tx_objset_null_writes   = 0;
 static kstat_t *qos_wake_kstat = NULL;
 
 typedef struct qos_wake_kstat {
@@ -55,6 +97,17 @@ typedef struct qos_wake_kstat {
 	kstat_named_t qwk_surplus_distributed;
 	kstat_named_t qwk_active_buckets_seen;
 	kstat_named_t qwk_idle_donors_seen;
+	/* U-patch13 */
+	kstat_named_t qwk_wake_mode;		/* 0=idle, 1=active */
+	kstat_named_t qwk_idle_cycles_total;	/* cumulative idle loop cycles */
+	kstat_named_t qwk_signaled_early;	/* wake-on-demand count */
+	/* W-patch15 */
+	kstat_named_t qwk_zil_waited_total;	/* ZIL fsync throttle events */
+	/* Z-patch18 cycle 1: O_DIRECT BW bypass diagnostics */
+	kstat_named_t qwk_consume_called_write;    /* H1 */
+	kstat_named_t qwk_consume_iops_only_write; /* H2 */
+	kstat_named_t qwk_fastpath_hit_write;      /* H4 */
+	kstat_named_t qwk_tx_objset_null_writes;   /* H5 */
 } qos_wake_kstat_t;
 
 static qos_wake_kstat_t qos_wake_kstat_data = {
@@ -62,6 +115,17 @@ static qos_wake_kstat_t qos_wake_kstat_data = {
 	{ "wake_surplus_distributed", KSTAT_DATA_UINT64 },
 	{ "wake_active_buckets_seen", KSTAT_DATA_UINT64 },
 	{ "wake_idle_donors_seen",    KSTAT_DATA_UINT64 },
+	/* U-patch13 */
+	{ "wake_mode",                KSTAT_DATA_UINT64 },
+	{ "wake_idle_cycles_total",   KSTAT_DATA_UINT64 },
+	{ "wake_signaled_early",      KSTAT_DATA_UINT64 },
+	/* W-patch15 */
+	{ "zil_waited_total",         KSTAT_DATA_UINT64 },
+	/* Z-patch18 cycle 1 */
+	{ "stat_consume_called_write",    KSTAT_DATA_UINT64 },
+	{ "stat_consume_iops_only_write", KSTAT_DATA_UINT64 },
+	{ "stat_fastpath_hit_write",      KSTAT_DATA_UINT64 },
+	{ "stat_tx_objset_null_writes",   KSTAT_DATA_UINT64 },
 };
 
 /*
@@ -176,17 +240,8 @@ qos_bucket_fini(qos_bucket_t *bucket)
 			list_remove(&pool->dp_qos_active_buckets, bucket);
 			bucket->qb_on_active_list = B_FALSE;
 		}
-		boolean_t empty = list_is_empty(&pool->dp_qos_active_buckets);
 		mutex_exit(&pool->dp_qos_active_lock);
-
-		if (empty) {
-			mutex_enter(&qos_active_pools_lock);
-			if (pool->dp_qos_on_active_pools) {
-				list_remove(&qos_active_pools, pool);
-				pool->dp_qos_on_active_pools = B_FALSE;
-			}
-			mutex_exit(&qos_active_pools_lock);
-		}
+		/* X-patch16: no global pool list to clean up. */
 	}
 
 	list_destroy(&bucket->qb_waiters);
@@ -269,17 +324,12 @@ qos_bucket_disable(qos_bucket_t *bucket)
 			list_remove(&pool->dp_qos_active_buckets, bucket);
 			bucket->qb_on_active_list = B_FALSE;
 		}
-		boolean_t empty = list_is_empty(&pool->dp_qos_active_buckets);
 		mutex_exit(&pool->dp_qos_active_lock);
-
-		if (empty) {
-			mutex_enter(&qos_active_pools_lock);
-			if (pool->dp_qos_on_active_pools) {
-				list_remove(&qos_active_pools, pool);
-				pool->dp_qos_on_active_pools = B_FALSE;
-			}
-			mutex_exit(&qos_active_pools_lock);
-		}
+		/*
+		 * X-patch16: no global pool list — the per-pool wake thread
+		 * notices an empty dp_qos_active_buckets itself and drops
+		 * into idle cadence.
+		 */
 	}
 }
 
@@ -290,11 +340,57 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	qos_result_t ret;
 	qos_token_bucket_t *tb;
 
+	/* T-patch12: guard against signed/unsigned cast overflow at line 335 */
+	VERIFY3U(io_size, <=, SPA_MAXBLOCKSIZE);
+
+	/*
+	 * S-patch11: fast-path — zero lock when QoS is disabled.
+	 * qb_enabled is volatile; on x86 this is a relaxed read with no
+	 * barrier cost. qos_bucket_enable/disable write qb_enabled under
+	 * qb_lock, and mutex_exit on those paths publishes the value.
+	 * We re-check under the lock below to close the race where a
+	 * concurrent enable lands between the fast-path read and the
+	 * slow path acquiring the lock.
+	 */
+	if (!bucket->qb_enabled) {
+		/*
+		 * Z-patch18 cycle 1 (H4 probe): count WRITE fast-path exits.
+		 * A non-zero value while buffered writes throttle but O_DIRECT
+		 * writes do not would indicate a qb_enabled race specific to
+		 * the O_DIRECT path.
+		 */
+		if (type == QOS_IO_WRITE)
+			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
+		return (QOS_OK);
+	}
+
 	mutex_enter(&bucket->qb_lock);
 
 	if (!bucket->qb_enabled) {
+		/*
+		 * Z-patch18 cycle 1 (H4 probe): race-window fast-path hit
+		 * where disable landed between the lock-free read and the
+		 * slow-path acquire.  Count it under the same H4 counter.
+		 */
+		if (type == QOS_IO_WRITE)
+			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
 		mutex_exit(&bucket->qb_lock);
 		return (QOS_OK);
+	}
+
+	/*
+	 * Z-patch18 cycle 1: count WRITE entries past both fast-path gates.
+	 *   io_size > 0  → H1 probe (normal BW-bearing write).
+	 *   io_size == 0 → H2 probe (W-patch15 ZIL IOPS-only consume).
+	 * We account once per call, before any token / size checks so that
+	 * a reject on io_size_max is still counted (H1 is a pure entry
+	 * counter, not a success counter).
+	 */
+	if (type == QOS_IO_WRITE) {
+		if (io_size > 0)
+			atomic_add_64(&qos_kstat_consume_called_write, 1);
+		else
+			atomic_add_64(&qos_kstat_consume_iops_only_write, 1);
 	}
 
 	/* Check io_size_max before refill — hard reject. */
@@ -388,28 +484,33 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	/*
 	 * Throttled: add to pool active list so the wake thread can
 	 * distribute surplus tokens to this borrower (pass 2).
-	 * Lock ordering requires releasing qb_lock before acquiring
-	 * dp_qos_active_lock and qos_active_pools_lock.
+	 *
+	 * X-patch16: lock ordering is now
+	 *   dp_qos_wake_lock → dp_qos_active_lock → qb_lock
+	 * (replaces the previous qos_active_pools_lock at the top).
+	 * We must release qb_lock before acquiring the wake+active locks.
+	 * cv_signal of dp_qos_wake_cv under dp_qos_wake_lock guarantees the
+	 * per-pool wake thread cannot miss this insertion (cv_timedwait_sig
+	 * drops the lock atomically during its wait).
 	 */
 	if (ret == QOS_THROTTLED && !bucket->qb_on_active_list &&
 	    bucket->qb_pool != NULL) {
 		dsl_pool_t *pool = bucket->qb_pool;
 		mutex_exit(&bucket->qb_lock);
-		mutex_enter(&qos_active_pools_lock);
+		mutex_enter(&pool->dp_qos_wake_lock);
 		mutex_enter(&pool->dp_qos_active_lock);
 		mutex_enter(&bucket->qb_lock);
 		if (!bucket->qb_on_active_list && bucket->qb_enabled) {
 			list_insert_tail(&pool->dp_qos_active_buckets,
 			    bucket);
 			bucket->qb_on_active_list = B_TRUE;
-		}
-		if (!pool->dp_qos_on_active_pools) {
-			list_insert_tail(&qos_active_pools, pool);
-			pool->dp_qos_on_active_pools = B_TRUE;
+			/* X-patch16: wake-on-demand per-pool signal. */
+			cv_signal(&pool->dp_qos_wake_cv);
+			atomic_add_64(&qos_kstat_signaled_early, 1);
 		}
 		mutex_exit(&bucket->qb_lock);
 		mutex_exit(&pool->dp_qos_active_lock);
-		mutex_exit(&qos_active_pools_lock);
+		mutex_exit(&pool->dp_qos_wake_lock);
 		return (ret);
 	}
 
@@ -446,7 +547,8 @@ qos_bucket_refund(qos_bucket_t *bucket, uint64_t bytes)
  * qos_bucket_refund.  Falls through after QOS_READ_MAX_RETRIES to
  * prevent unbounded latency.
  */
-#define	QOS_READ_MAX_RETRIES	1000	/* 1000 * 10ms = 10s max */
+/* V-patch14: tunable — default 10s, clamped at runtime to 100ms-120s. */
+static int zfs_qos_read_timeout_ms = 10000;
 
 void
 qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
@@ -454,6 +556,20 @@ qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
 {
 	int retries = 0;
 	qos_result_t qr;
+
+	/* T-patch12: guard against signed/unsigned cast overflow */
+	VERIFY3U(io_size, <=, SPA_MAXBLOCKSIZE);
+
+	/*
+	 * V-patch14: freeze the retry budget at entry so in-flight waiters
+	 * honour the tunable value observed when they started (a later
+	 * sysfs write will only affect subsequent callers).  Enforce a
+	 * floor of 100 ms so a pathological value (e.g. 0) cannot disable
+	 * the throttle entirely.
+	 */
+	int max_retries = zfs_qos_read_timeout_ms / 10;
+	if (max_retries < 10)
+		max_retries = 10;
 
 	do {
 		qr = qos_bucket_try_consume(bucket, type, io_size);
@@ -468,7 +584,7 @@ qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
 		(void) cv_timedwait(&bucket->qb_read_cv, &bucket->qb_lock,
 		    ddi_get_lbolt() + MSEC_TO_TICK(10));
 		mutex_exit(&bucket->qb_lock);
-	} while (++retries < QOS_READ_MAX_RETRIES);
+	} while (++retries < max_retries);
 }
 
 /* QoS R/W split: aggregate stats from both directions (Q-patch10) */
@@ -489,26 +605,25 @@ qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
 }
 
 /*
- * Global wake thread — runs every 1 ms.  Per-pool 3-pass algorithm:
+ * Per-pool wake thread — runs every 1 ms (50 ms when idle).
+ * X-patch16: one thread per dsl_pool_t, scope limited to that pool's
+ * dp_qos_active_buckets.  The global qos_active_pools iteration has been
+ * removed — each thread serves exactly one pool.
+ *
+ * 3-pass algorithm (unchanged):
  *   Pass 1: refill tokens, collect surplus from contributing buckets.
  *   Pass 2: distribute surplus to boost-enabled buckets (weighted).
  *   Pass 3: dispatch waiting ZIOs using own + boost tokens.
  */
-static void
-qos_wake_thread(void *arg)
+void
+qos_pool_wake_thread(void *arg)
 {
-	(void) arg;
+	dsl_pool_t *pool = (dsl_pool_t *)arg;
 
-	mutex_enter(&qos_active_pools_lock);
+	mutex_enter(&pool->dp_qos_wake_lock);
 
-	while (!qos_wake_exit) {
-		dsl_pool_t *pool;
-		dsl_pool_t *next_pool;
-
-		for (pool = list_head(&qos_active_pools);
-		    pool != NULL; pool = next_pool) {
-			next_pool = list_next(&qos_active_pools, pool);
-
+	while (pool->dp_qos_wake_running) {
+		{
 			/*
 			 * QoS R/W split: persistent surplus pool (Q-patch10 +
 			 * fix v3).  Surplus collected from idle donors is ADDED
@@ -527,15 +642,15 @@ qos_wake_thread(void *arg)
 			/* ── PASS 1: refill + collect surplus from idle donors ── */
 			hrtime_t now = gethrtime();
 			int64_t wake_elapsed_ms = 1;
-			if (qos_wake_last_time > 0) {
-				wake_elapsed_ms = (now - qos_wake_last_time) /
-				    1000000;
+			if (pool->dp_qos_wake_last_time > 0) {
+				wake_elapsed_ms = (now -
+				    pool->dp_qos_wake_last_time) / 1000000;
 				if (wake_elapsed_ms < 1)
 					wake_elapsed_ms = 1;
 				if (wake_elapsed_ms > 1000)
 					wake_elapsed_ms = 1000;
 			}
-			qos_wake_last_time = now;
+			pool->dp_qos_wake_last_time = now;
 			mutex_enter(&pool->dp_qos_active_lock);
 			qos_bucket_t *bucket;
 			qos_bucket_t *next;
@@ -987,33 +1102,107 @@ qos_wake_thread(void *arg)
 			}
 
 			/* Remove pool if no active buckets remain. */
-			if (list_is_empty(&pool->dp_qos_active_buckets)) {
-				list_remove(&qos_active_pools, pool);
-				pool->dp_qos_on_active_pools = B_FALSE;
-			}
+			/*
+			 * X-patch16: no global pool list — an empty per-pool
+			 * bucket list simply drops us into idle cadence.  The
+			 * pool remains owned by the live thread.
+			 */
 
 			mutex_exit(&pool->dp_qos_active_lock);
 		}
 
-		/* Sleep 1 ms or until signaled. */
-		(void) cv_timedwait_sig(&qos_wake_cv,
-		    &qos_active_pools_lock,
-		    ddi_get_lbolt() + MSEC_TO_TICK(QOS_WAKE_INTERVAL_MS));
+		/*
+		 * U-patch13 + X-patch16: adaptive cadence, per-pool.
+		 * When this pool's bucket list has been empty for two
+		 * consecutive iterations, drop wake frequency from
+		 * QOS_WAKE_INTERVAL_MS (1 ms) to 50 ms.  A producer
+		 * inserting into dp_qos_active_buckets will cv_signal our
+		 * dp_qos_wake_cv back to the fast cadence in well under
+		 * 1 ms.  Hysteresis (>=2) avoids flapping.
+		 */
+		if (list_is_empty(&pool->dp_qos_active_buckets)) {
+			if (++pool->dp_qos_wake_idle_cycles >= 2) {
+				/*
+				 * X-patch16 c4: decrement shared pool
+				 * counter on the active→idle transition
+				 * edge only.  Guarded by the per-pool mode
+				 * to avoid double-decrement on successive
+				 * idle cycles.
+				 */
+				if (pool->dp_qos_wake_mode == 1) {
+					atomic_add_64(
+					    &qos_kstat_pools_active,
+					    (uint64_t)-1);
+				}
+				pool->dp_qos_wake_mode = 0;
+			}
+			/* X-patch16 c4: atomic aggregate (was racy ++). */
+			atomic_add_64(&qos_kstat_idle_cycles_total, 1);
+		} else {
+			pool->dp_qos_wake_idle_cycles = 0;
+			/*
+			 * X-patch16 c4: increment shared pool counter on
+			 * the idle→active transition edge only.
+			 */
+			if (pool->dp_qos_wake_mode == 0) {
+				atomic_add_64(&qos_kstat_pools_active, 1);
+			}
+			pool->dp_qos_wake_mode = 1;
+		}
+		/* X-patch16 c4: publish aggregated counters. */
+		qos_wake_kstat_data.qwk_idle_cycles_total.value.ui64 =
+		    qos_kstat_idle_cycles_total;
+		qos_wake_kstat_data.qwk_wake_mode.value.ui64 =
+		    (qos_kstat_pools_active > 0) ? 1 : 0;
+		qos_wake_kstat_data.qwk_signaled_early.value.ui64 =
+		    qos_kstat_signaled_early;
+		/* W-patch15: publish the ZIL throttle counter. */
+		qos_wake_kstat_data.qwk_zil_waited_total.value.ui64 =
+		    qos_zil_waited_total;
+		/* Z-patch18 cycle 1: publish O_DIRECT bypass diagnostics. */
+		qos_wake_kstat_data.qwk_consume_called_write.value.ui64 =
+		    qos_kstat_consume_called_write;
+		qos_wake_kstat_data.qwk_consume_iops_only_write.value.ui64 =
+		    qos_kstat_consume_iops_only_write;
+		qos_wake_kstat_data.qwk_fastpath_hit_write.value.ui64 =
+		    qos_kstat_fastpath_hit_write;
+		qos_wake_kstat_data.qwk_tx_objset_null_writes.value.ui64 =
+		    qos_kstat_tx_objset_null_writes;
+
+		int wake_ms = (pool->dp_qos_wake_idle_cycles >= 2) ?
+		    50 : QOS_WAKE_INTERVAL_MS;
+		(void) cv_timedwait_sig(&pool->dp_qos_wake_cv,
+		    &pool->dp_qos_wake_lock,
+		    ddi_get_lbolt() + MSEC_TO_TICK(wake_ms));
 	}
 
-	mutex_exit(&qos_active_pools_lock);
+	/*
+	 * X-patch16 cycle 2: signal dsl_pool_close() that we will no longer
+	 * touch dp_qos_wake_lock / dp_qos_wake_cv.  We must clear the thread
+	 * handle and cv_broadcast before dropping the lock — after
+	 * mutex_exit, the close path may destroy the lock.
+	 *
+	 * X-patch16 cycle 4: if we are exiting while still in active mode,
+	 * decrement the shared pools-active counter so repeated pool
+	 * create/destroy cycles do not leak the kstat.
+	 */
+	if (pool->dp_qos_wake_mode == 1) {
+		atomic_add_64(&qos_kstat_pools_active, (uint64_t)-1);
+		pool->dp_qos_wake_mode = 0;
+	}
+	pool->dp_qos_wake_thr = NULL;
+	cv_broadcast(&pool->dp_qos_wake_cv);
+	mutex_exit(&pool->dp_qos_wake_lock);
 	thread_exit();
 }
 
 void
 qos_system_init(void)
 {
-	mutex_init(&qos_active_pools_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&qos_wake_cv, NULL, CV_DEFAULT, NULL);
-	list_create(&qos_active_pools, sizeof (dsl_pool_t),
-	    offsetof(dsl_pool_t, dp_qos_active_node));
-	qos_wake_exit = B_FALSE;
-
+	/*
+	 * X-patch16: wake threads are per-pool, started by dsl_pool_open_impl.
+	 * System-wide init retains only the diagnostic kstat creation.
+	 */
 	qos_wake_kstat = kstat_create("zfs", 0, "qos-boost-wake",
 	    "misc", KSTAT_TYPE_NAMED,
 	    sizeof (qos_wake_kstat_data) / sizeof (kstat_named_t),
@@ -1022,27 +1211,23 @@ qos_system_init(void)
 		qos_wake_kstat->ks_data = &qos_wake_kstat_data;
 		kstat_install(qos_wake_kstat);
 	}
-
-	qos_wake_thr = thread_create(NULL, 0, qos_wake_thread,
-	    NULL, 0, &p0, TS_RUN, defclsyspri);
 }
 
 void
 qos_system_fini(void)
 {
-	mutex_enter(&qos_active_pools_lock);
-	qos_wake_exit = B_TRUE;
-	cv_signal(&qos_wake_cv);
-	mutex_exit(&qos_active_pools_lock);
-
-	thread_join(qos_wake_thr);
-
+	/*
+	 * X-patch16: the wake threads are stopped by dsl_pool_close before
+	 * the owning pool is torn down.  System-wide fini only drops the
+	 * diagnostic kstat.
+	 */
 	if (qos_wake_kstat != NULL) {
 		kstat_delete(qos_wake_kstat);
 		qos_wake_kstat = NULL;
 	}
-
-	list_destroy(&qos_active_pools);
-	cv_destroy(&qos_wake_cv);
-	mutex_destroy(&qos_active_pools_lock);
 }
+
+/* V-patch14: expose the read-throttle timeout as a hot-tunable module param. */
+ZFS_MODULE_PARAM(zfs, zfs_, qos_read_timeout_ms, INT, ZMOD_RW,
+	"Max milliseconds for a throttled read I/O to wait for tokens "
+	"(default 10000, floor 100). Set below NFS client timeo value.");

@@ -238,11 +238,20 @@ dsl_pool_open_impl(spa_t *spa, uint64_t txg)
 	mutex_init(&dp->dp_qos_active_lock, NULL, MUTEX_DEFAULT, NULL);
 	list_create(&dp->dp_qos_active_buckets, sizeof (qos_bucket_t),
 	    offsetof(qos_bucket_t, qb_active_node));
-	dp->dp_qos_on_active_pools = B_FALSE;
 	dp->dp_qos_surplus_bw_read = 0;
 	dp->dp_qos_surplus_bw_write = 0;
 	dp->dp_qos_surplus_iops_read = 0;
 	dp->dp_qos_surplus_iops_write = 0;
+
+	/* X-patch16: per-pool wake thread (replaces global qos_wake_thread) */
+	mutex_init(&dp->dp_qos_wake_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&dp->dp_qos_wake_cv, NULL, CV_DEFAULT, NULL);
+	dp->dp_qos_wake_running = B_TRUE;
+	dp->dp_qos_wake_idle_cycles = 0;
+	dp->dp_qos_wake_mode = 0;
+	dp->dp_qos_wake_last_time = 0;   /* X-patch16 c3: per-pool cadence */
+	dp->dp_qos_wake_thr = thread_create(NULL, 0, qos_pool_wake_thread,
+	    dp, 0, &p0, TS_RUN, defclsyspri);
 
 	return (dp);
 }
@@ -450,13 +459,24 @@ dsl_pool_close(dsl_pool_t *dp)
 
 	taskq_destroy(dp->dp_unlinked_drain_taskq);
 	taskq_destroy(dp->dp_zrele_taskq);
-	/* QoS Boost: cleanup per-pool active list (patch08) */
-	mutex_enter(&qos_active_pools_lock);
-	if (dp->dp_qos_on_active_pools) {
-		list_remove(&qos_active_pools, dp);
-		dp->dp_qos_on_active_pools = B_FALSE;
+	/*
+	 * X-patch16 cycle 2: stop per-pool wake thread before destroying
+	 * the buckets list.  thread_join() is VERIFY(0) on Linux, so we use
+	 * a condvar handshake: qos_pool_wake_thread() clears dp_qos_wake_thr
+	 * and cv_broadcasts dp_qos_wake_cv under dp_qos_wake_lock right
+	 * before thread_exit().  We wait for the NULL sentinel to know the
+	 * thread will no longer touch the lock/CV we are about to destroy.
+	 */
+	mutex_enter(&dp->dp_qos_wake_lock);
+	dp->dp_qos_wake_running = B_FALSE;
+	cv_signal(&dp->dp_qos_wake_cv);
+	while (dp->dp_qos_wake_thr != NULL) {
+		cv_wait(&dp->dp_qos_wake_cv, &dp->dp_qos_wake_lock);
 	}
-	mutex_exit(&qos_active_pools_lock);
+	mutex_exit(&dp->dp_qos_wake_lock);
+	cv_destroy(&dp->dp_qos_wake_cv);
+	mutex_destroy(&dp->dp_qos_wake_lock);
+	/* QoS Boost: cleanup per-pool active list (patch08) */
 	list_destroy(&dp->dp_qos_active_buckets);
 	mutex_destroy(&dp->dp_qos_active_lock);
 

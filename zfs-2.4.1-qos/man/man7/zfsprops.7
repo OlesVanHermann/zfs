@@ -2331,3 +2331,25 @@ zfs set qos:max_iosize=131072 tank/client-001          # 128K
 zfs set qos:max_bw_read=0 tank/client-001              # disable read limit
 zfs inherit qos:max_bw_read tank/client-001            # inherit from parent
 .Ed
+.Ss QoS Module Parameters
+The following module parameters control system-wide QoS behavior and can
+be read and modified at runtime via
+.Pa /sys/module/zfs/parameters/ :
+.Bl -tag -width "zfs_qos_read_timeout_ms"
+.It Sy zfs_qos_read_timeout_ms
+Maximum time in milliseconds a throttled read I/O will wait for tokens
+before returning
+.Er EIO
+(default:
+.Sy 10000 ,
+effective floor:
+.Sy 100 ) .
+For NFS soft-mount clients, set this value below the client
+.Sy timeo
+parameter so ZFS abandons the wait before the NFS client issues its own
+.Er EIO .
+.Bd -literal -offset indent
+# Align with NFS timeo=80 (8 s)
+echo 7000 | sudo tee /sys/module/zfs/parameters/zfs_qos_read_timeout_ms
+.Ed
+.El

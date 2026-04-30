@@ -691,12 +691,36 @@ qos_prop_apply(dsl_dataset_t *ds)
 		iops_write_rate = (int64_t)tmp;
 	}
 
+	/*
+	 * AF-patch25 R1: read qos:enabled — if off, force the bucket
+	 * disabled even when rate properties are still set.  Before this
+	 * patch, qos_prop_apply() ignored qos:enabled entirely so the
+	 * "off" string was persisted in ZAP but never propagated to
+	 * qb_enabled, leaving the throttle active (stat_fastpath_hit_write
+	 * stayed 0 while rates were non-zero).
+	 */
+	boolean_t qos_enabled = B_TRUE;
+	if (dsl_prop_get_ds(ds, "qos:enabled", 1, sizeof (buf),
+	    buf, NULL) == 0) {
+		if (strcmp(buf, "off") == 0 || strcmp(buf, "0") == 0)
+			qos_enabled = B_FALSE;
+	}
+
 	/* Track old BW rate for pool-wide total update */
 	int64_t old_bw = ds->ds_qos.qb_enabled ?
 	    ds->ds_qos.qb_write.tb_bw_rate : 0;
 
-	if (iops_read_rate > 0 || iops_write_rate > 0 ||
-	    bw_read_rate > 0 || bw_write_rate > 0) {
+	/*
+	 * AF-patch25 R2: the gate is (has_rates && qos_enabled).  Either
+	 * "no rates set" OR "qos:enabled=off" routes through the disable
+	 * branch below, which destroys the kstat and drops qb_enabled so
+	 * qos_bucket_try_consume() takes its fast path and returns QOS_OK
+	 * without entering the throttle logic.
+	 */
+	boolean_t has_rates = (iops_read_rate > 0 || iops_write_rate > 0 ||
+	    bw_read_rate > 0 || bw_write_rate > 0);
+
+	if (has_rates && qos_enabled) {
 		qos_bucket_configure_split(&ds->ds_qos,
 		    iops_read_rate, bw_read_rate,
 		    iops_write_rate, bw_write_rate,
@@ -752,28 +776,29 @@ qos_prop_apply(dsl_dataset_t *ds)
 	 * If boost_pool=1 is set on an enabled bucket, add it to the
 	 * pool's active bucket list so the wake thread can collect its
 	 * surplus even if it never gets throttled (pure idle donor).
-	 * Lock order: qos_active_pools_lock -> dp_qos_active_lock -> qb_lock.
+	 *
+	 * X-patch16: the global qos_active_pools list is gone.  Lock order
+	 * is now dp_qos_wake_lock -> dp_qos_active_lock -> qb_lock, and we
+	 * wake the per-pool thread via dp_qos_wake_cv on every fresh
+	 * insertion so the donor is picked up on the next pass.
 	 */
 	if (ds->ds_qos.qb_enabled && ds->ds_qos.qb_boost_pool &&
 	    (ds->ds_qos.qb_read.tb_bw_rate > 0 ||
 	    ds->ds_qos.qb_write.tb_bw_rate > 0)) {
 		dsl_pool_t *pool = ds->ds_dir->dd_pool;
 		ds->ds_qos.qb_last_consume_time = gethrtime();
-		mutex_enter(&qos_active_pools_lock);
+		mutex_enter(&pool->dp_qos_wake_lock);
 		mutex_enter(&pool->dp_qos_active_lock);
 		mutex_enter(&ds->ds_qos.qb_lock);
 		if (!ds->ds_qos.qb_on_active_list) {
 			list_insert_tail(&pool->dp_qos_active_buckets,
 			    &ds->ds_qos);
 			ds->ds_qos.qb_on_active_list = B_TRUE;
-		}
-		if (!pool->dp_qos_on_active_pools) {
-			list_insert_tail(&qos_active_pools, pool);
-			pool->dp_qos_on_active_pools = B_TRUE;
+			cv_signal(&pool->dp_qos_wake_cv);
 		}
 		mutex_exit(&ds->ds_qos.qb_lock);
 		mutex_exit(&pool->dp_qos_active_lock);
-		mutex_exit(&qos_active_pools_lock);
+		mutex_exit(&pool->dp_qos_wake_lock);
 	}
 
 	/* QoS: update pool-wide dirty quota (F-patch05 + Q-patch10) */

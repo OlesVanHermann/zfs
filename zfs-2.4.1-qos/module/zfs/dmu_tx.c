@@ -1166,6 +1166,18 @@ dmu_tx_try_assign(dmu_tx_t *tx)
 			/* Track consumed bytes for potential refund on abort */
 			tx->tx_qos_consumed_bytes = towrite;
 		}
+	} else if (towrite > 0) {
+		/*
+		 * Z-patch18 cycle 1 (H5 probe): the DMU transaction carries
+		 * a write payload but has no owning objset, so the
+		 * per-dataset QoS BW gate above is skipped.  Count the
+		 * occurrence so the qos-boost-wake kstat slot
+		 * stat_tx_objset_null_writes reveals whether O_DIRECT
+		 * writes reach dmu_tx_try_assign() through a path that
+		 * leaves tx_objset unset.  Diagnostic only: no behaviour
+		 * change, no fallback throttle.
+		 */
+		atomic_add_64(&qos_kstat_tx_objset_null_writes, 1);
 	}
 
 	/* needed allocation: worst-case estimate of write space */
@@ -1219,7 +1231,16 @@ dmu_tx_unassign(dmu_tx_t *tx)
 	tx->tx_lasttried_txg = tx->tx_txg;
 	tx->tx_txg = 0;
 
-	/* Refund QoS tokens consumed in this try_assign attempt */
+	/*
+	 * Z-patch19: refund QoS BW tokens consumed by this try_assign
+	 * attempt.  Relocated here from dmu_tx_commit(): commit is the
+	 * success path (the consumption must stand), while unassign is
+	 * reached either on ERESTART retries inside dmu_tx_assign() or
+	 * from dmu_tx_abort() — both are the "tokens did not back real
+	 * work" path.  The Y-scale port erroneously put the refund in
+	 * commit(), netting every WRITE to zero tokens and making the
+	 * BW gate ineffective for O_DIRECT (and any other) write path.
+	 */
 	if (tx->tx_qos_consumed_bytes > 0 && tx->tx_objset != NULL) {
 		dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
 		if (ds != NULL && ds->ds_qos.qb_enabled)
@@ -1501,6 +1522,14 @@ dmu_tx_commit(dmu_tx_t *tx)
 {
 	/* This function should only be used on assigned transactions. */
 	ASSERT(tx->tx_txg != 0);
+
+	/*
+	 * Z-patch19: the QoS refund block that used to live here has been
+	 * moved to dmu_tx_unassign().  Commit is the success path — the
+	 * BW/IOPS tokens consumed at try_assign() must stand to rate-limit
+	 * real work.  Refunding here nets every write to zero tokens and
+	 * bypasses the cap; see dmu_tx_unassign() for the relocated block.
+	 */
 
 	/*
 	 * Go through the transaction's hold list and remove holds on

@@ -4038,11 +4038,17 @@ zil_commit_flags(zilog_t *zilog, uint64_t foid, zil_commit_flag_t flags)
 	{
 		dsl_dataset_t *ds = dmu_objset_ds(zilog->zl_os);
 		if (ds != NULL && ds->ds_qos.qb_enabled) {
-			while (ds->ds_qos.qb_enabled &&
-			    qos_bucket_try_consume(&ds->ds_qos,
-			    QOS_IO_WRITE, 0) == QOS_THROTTLED) {
-				delay(MSEC_TO_TICK(10));
-			}
+			/*
+			 * W-patch15: cv_timedwait in place of delay() busy-loop.
+			 * qos_bucket_wait_consume() runs the S-patch11 fast-path
+			 * internally, honours the V-patch14 timeout and, on
+			 * timeout, returns so the fsync ACK proceeds (best-effort
+			 * throttle).  io_size=0 -> IOPS-only, so T-patch12's
+			 * VERIFY3U(0 <= SPA_MAXBLOCKSIZE) is trivially satisfied.
+			 */
+			atomic_add_64(&qos_zil_waited_total, 1);
+			qos_bucket_wait_consume(&ds->ds_qos,
+			    QOS_IO_WRITE, 0);
 			/* QOS_IO_TOO_LARGE impossible with io_size=0. */
 		}
 	}

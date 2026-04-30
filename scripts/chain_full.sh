@@ -51,17 +51,28 @@ echo ""
 cleanup_between() {
     echo ">>> cleanup_between $(date)"
     sudo pkill -9 -x fio 2>/dev/null || true
-    # Wait for D-state processes to clear
-    local retries=0
-    while [ $retries -lt 10 ]; do
-        local dstate
+    # Also kill fio inside test VMs (NFS hard mounts frequently leave the
+    # remote fio blocked, which keeps host-side D-state pinned forever).
+    ${LNX_SSH:-:} "sudo pkill -9 -x fio 2>/dev/null || true" 2>/dev/null || true
+    ${BSD_SSH:-:} "sudo pkill -9 -x fio 2>/dev/null || true" 2>/dev/null || true
+
+    # Wait for host D-state processes to clear. Previously: 10×2s = 20s hard cap
+    # which was routinely too short for NFS/iSCSI writeback to drain.
+    local retries=0 max_retries=60 dstate first_dstate=""
+    while [ $retries -lt $max_retries ]; do
         dstate=$(ps -eo stat --no-headers 2>/dev/null | grep -c '^D' || true)
         dstate=$(echo "$dstate" | tr -d '[:space:]')
         : "${dstate:=0}"
+        [ $retries -eq 0 ] && first_dstate=$dstate
         [ "$dstate" -le 1 ] && break
         retries=$((retries+1))
         sleep 2
     done
+    if [ "$dstate" -gt 1 ]; then
+        # Stubborn D-state: list the offenders so the operator has a trail.
+        echo "  WARN: ${dstate} D-state procs still present after $((max_retries*2))s (started at ${first_dstate})"
+        ps -eo stat,pid,comm --no-headers | grep '^D' | head -10
+    fi
     sleep 2
 }
 
@@ -128,12 +139,25 @@ if [ $SKIP_SETUP -eq 0 ]; then
     setup_rc=$?
     if [ $setup_rc -ne 0 ]; then
         echo ""
-        echo "${RED}SETUP FAILED — certains protocoles peuvent ne pas fonctionner${RST}"
-        echo "Continuation malgré les erreurs..."
+        echo "${RED}SETUP FAILED (rc=$setup_rc) — infrastructure not ready${RST}"
+        if [ "${ALLOW_PARTIAL:-0}" = "1" ]; then
+            echo "${YEL}ALLOW_PARTIAL=1 set — continuing anyway${RST}"
+        else
+            echo "${RED}Aborting to avoid false PASSes. Set ALLOW_PARTIAL=1 to force continue.${RST}"
+            exit 1
+        fi
     fi
 else
     section "PHASE 1 — Setup skippé, vérification rapide"
-    bash "$SCRIPT_DIR/verify_all.sh" || echo "${YEL}Certains checks ont échoué${RST}"
+    if ! bash "$SCRIPT_DIR/verify_all.sh"; then
+        echo "${RED}verify_all FAILED — infrastructure not consistent${RST}"
+        if [ "${ALLOW_PARTIAL:-0}" = "1" ]; then
+            echo "${YEL}ALLOW_PARTIAL=1 — continuing${RST}"
+        else
+            echo "${RED}Aborting. Set ALLOW_PARTIAL=1 to force continue.${RST}"
+            exit 1
+        fi
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

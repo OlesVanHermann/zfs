@@ -101,8 +101,8 @@ typedef struct qos_bucket {
 	hrtime_t		qb_last_consume_time;
 	/* Shared rejected-size counter */
 	uint64_t		qb_stat_rejected_size;
-	/* State */
-	boolean_t		qb_enabled;
+	/* State (S-patch11: volatile for lockless fast-path read) */
+	volatile boolean_t	qb_enabled;
 	/* QoS Boost: shared fields */
 	uint32_t		qb_boost_factor;
 	boolean_t		qb_boost_pool;
@@ -131,9 +131,21 @@ void qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
 void qos_system_init(void);
 void qos_system_fini(void);
 
-/* QoS Boost: global pool tracking (patch08) */
-extern kmutex_t qos_active_pools_lock;
-extern list_t qos_active_pools;
+/* X-patch16: per-pool wake thread (replaces the global qos_active_pools list).
+ * The wake worker body is exported so dsl_pool.c can launch it per pool. */
+void qos_pool_wake_thread(void *arg);
+
+/* W-patch15: ZIL throttle counter — incremented by zil.c, sampled by kstat. */
+extern uint64_t qos_zil_waited_total;
+
+/*
+ * Z-patch18 cycle 1: diagnostic counter for the O_DIRECT BW-bypass
+ * investigation (H5 probe).  Incremented by dmu_tx_try_assign() when
+ * a transaction carries a write payload (towrite > 0) but its
+ * tx_objset is NULL — the BW gate cannot resolve a dataset so the
+ * hook is skipped.  Published in the qos-boost-wake kstat.
+ */
+extern uint64_t qos_kstat_tx_objset_null_writes;
 
 #ifdef	__cplusplus
 }

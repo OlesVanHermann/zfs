@@ -21,10 +21,11 @@ ONLY_VERIFY=0
 
 for arg in "$@"; do
     case "$arg" in
-        --reboot)   DO_REBOOT=1 ;;
-        --teardown) ONLY_TEARDOWN=1 ;;
-        --verify)   ONLY_VERIFY=1 ;;
-        *) echo "Usage: $0 [--reboot] [--teardown] [--verify]"; exit 1 ;;
+        --reboot|reboot=1)    DO_REBOOT=1 ;;
+        reboot=0)             DO_REBOOT=0 ;;
+        --teardown|teardown)  ONLY_TEARDOWN=1 ;;
+        --verify|verify)      ONLY_VERIFY=1 ;;
+        *) echo "Usage: $0 [--reboot|reboot=0|reboot=1] [--teardown] [--verify]"; exit 1 ;;
     esac
 done
 
@@ -478,33 +479,74 @@ connect_nvmeof() {
     echo "  Connect FreeBSD VM NVMe-oF..."
     sudo nvme connect -t tcp -a "$BSD_VM_IP" -s "$NVME_PORT" -n "$BSD_NVME_NQN" 2>/dev/null || true
 
-    # Wait for devices
+    # Wait for devices.
+    # Match namespaces by NQN via /sys/class/nvme/nvmeN/subsysnqn — matching on
+    # model string (e.g. "Linux") is ambiguous (both targets may advertise the
+    # same model) and can over- or under-count.
     echo "  Attente devices NVMe..."
-    local retries=0
+    local retries=0 lnx_count=0 bsd_count=0
     while [ $retries -lt 15 ]; do
-        local lnx_count bsd_count
-        lnx_count=$(sudo nvme list 2>/dev/null | grep -c "Linux" || echo 0)
-        if [ "$lnx_count" -ge 5 ]; then
-            log_ok "NVMe-oF Linux: $lnx_count namespaces"
+        lnx_count=$(nvmeof_namespaces_for_nqn "$LNX_NVME_NQN")
+        bsd_count=$(nvmeof_namespaces_for_nqn "$BSD_NVME_NQN")
+        if [ "$lnx_count" -ge 5 ] && [ "$bsd_count" -ge 5 ]; then
             break
         fi
         retries=$((retries+1))
         sleep 1
     done
-    if [ "$lnx_count" -lt 5 ]; then
-        err "NVMe-oF Linux: $lnx_count namespaces (attendu 5)"
-    fi
 
-    # FreeBSD NVMe-oF check
-    local bsd_nvme_count
-    bsd_nvme_count=$(sudo nvme list 2>/dev/null | grep -c "FreeBSD" || true)
-    bsd_nvme_count=$(echo "$bsd_nvme_count" | tr -d '[:space:]')
-    : "${bsd_nvme_count:=0}"
-    if [ "$bsd_nvme_count" -ge 5 ]; then
-        log_ok "NVMe-oF FreeBSD: $bsd_nvme_count namespaces"
+    if [ "$lnx_count" -ge 5 ]; then
+        log_ok "NVMe-oF Linux ($LNX_NVME_NQN): $lnx_count namespaces"
     else
-        log_warn "NVMe-oF FreeBSD: $bsd_nvme_count namespaces (attendu 5)"
+        err "NVMe-oF Linux ($LNX_NVME_NQN): $lnx_count namespaces (attendu 5)"
     fi
+    if [ "$bsd_count" -ge 5 ]; then
+        log_ok "NVMe-oF FreeBSD ($BSD_NVME_NQN): $bsd_count namespaces"
+    else
+        log_warn "NVMe-oF FreeBSD ($BSD_NVME_NQN): $bsd_count namespaces (attendu 5)"
+    fi
+}
+
+# nvmeof_namespaces_for_nqn <nqn> — count host-side namespaces for a given subsys NQN
+nvmeof_namespaces_for_nqn() {
+    local want_nqn="$1" total=0
+    local ctrl
+    for ctrl in /sys/class/nvme/nvme*; do
+        [ -d "$ctrl" ] || continue
+        local have_nqn=""
+        have_nqn=$(sudo cat "$ctrl/subsysnqn" 2>/dev/null | tr -d '[:space:]')
+        if [ "$have_nqn" = "$want_nqn" ]; then
+            # Count namespaces under this controller (nvmeN/nvmeNnM)
+            local ns_count
+            ns_count=$(ls -d "$ctrl"/nvme*n* 2>/dev/null | wc -l)
+            total=$((total + ns_count))
+        fi
+    done
+    echo "$total"
+}
+
+# iscsi_host_for_iqn <iqn> — echo the SCSI host number for the session whose
+# targetname matches <iqn>. Empty if no session found.
+# Uses iscsiadm session list + sysfs walk rather than guessing from sd? ordering.
+iscsi_host_for_iqn() {
+    local want_iqn="$1"
+    local sess_id line target sess_path host
+    while IFS= read -r line; do
+        # Example line: "tcp: [3] 10.0.0.5:3260,1 iqn.xxx (non-flash)"
+        sess_id=$(echo "$line" | sed -n 's/^[^[]*\[\([0-9]*\)\].*/\1/p')
+        target=$(echo "$line" | awk '{print $4}')
+        [ -z "$sess_id" ] && continue
+        if [ "$target" = "$want_iqn" ]; then
+            sess_path=$(ls -d /sys/class/iscsi_session/session${sess_id}/device/target* 2>/dev/null | head -1)
+            [ -z "$sess_path" ] && continue
+            host=$(basename "$sess_path" | sed 's/target//' | awk -F: '{print $1}')
+            if [ -n "$host" ]; then
+                echo "$host"
+                return 0
+            fi
+        fi
+    done < <(sudo iscsiadm -m session -P 0 2>/dev/null)
+    return 1
 }
 
 mount_iscsi_by_lun() {
@@ -632,41 +674,12 @@ mount_all() {
 
     section "Phase 4e — Mount iSCSI"
 
-    # Identifier les SCSI hosts pour chaque target
+    # Map each active iSCSI session to its SCSI host via sysfs. Previous code
+    # guessed "first host = Linux, second = BSD" which is order-dependent and
+    # wrong whenever sessions are re-logged-in (hosts get renumbered).
     local lnx_host="" bsd_host=""
-    for dev in /dev/sd?; do
-        [ -b "$dev" ] || continue
-        local hctl
-        hctl=$(lsblk -ndo HCTL "$dev" 2>/dev/null) || continue
-        [ -z "$hctl" ] && continue
-        local h=$(echo "$hctl" | awk -F: '{print $1}')
-        # Le premier host non-identifié est Linux, le second est BSD
-        if [ -z "$lnx_host" ]; then
-            lnx_host=$h
-        elif [ "$h" != "$lnx_host" ] && [ -z "$bsd_host" ]; then
-            bsd_host=$h
-        fi
-    done
-
-    # Vérifier quel host est quel target via iscsiadm
-    local real_lnx_host="" real_bsd_host=""
-    while IFS= read -r line; do
-        local sess_host sess_target
-        sess_host=$(echo "$line" | awk '{print $1}' | sed 's/.*\[//' | sed 's/\]//')
-        sess_target=$(echo "$line" | awk '{print $4}')
-        # Map session ID to SCSI host
-        local sess_path="/sys/class/iscsi_session/session${sess_host}/device/target*"
-        local target_host
-        target_host=$(ls -d $sess_path 2>/dev/null | head -1 | sed 's/.*target//' | awk -F: '{print $1}')
-        if echo "$sess_target" | grep -q "$LNX_ISCSI_IQN"; then
-            real_lnx_host=$target_host
-        elif echo "$sess_target" | grep -q "$BSD_ISCSI_IQN"; then
-            real_bsd_host=$target_host
-        fi
-    done < <(sudo iscsiadm -m session -P 0 2>/dev/null)
-
-    [ -n "$real_lnx_host" ] && lnx_host=$real_lnx_host
-    [ -n "$real_bsd_host" ] && bsd_host=$real_bsd_host
+    lnx_host=$(iscsi_host_for_iqn "$LNX_ISCSI_IQN")
+    bsd_host=$(iscsi_host_for_iqn "$BSD_ISCSI_IQN")
 
     if [ -n "$lnx_host" ]; then
         mount_iscsi_by_lun "$MNT_ISCSI_LNX" "$lnx_host" "Linux"
