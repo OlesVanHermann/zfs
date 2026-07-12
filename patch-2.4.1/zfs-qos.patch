@@ -9,7 +9,7 @@
  	sys/rrwlock.h \
  	sys/sa.h \
 --- zfs-2.4.1/include/sys/arc_impl.h	2026-02-24 20:50:55.790270076 +0000
-+++ zfs-2.4.1-qos/include/sys/arc_impl.h	2026-04-14 20:39:24.049382424 +0000
++++ zfs-2.4.1-qos/include/sys/arc_impl.h	2026-07-09 23:10:29.390290162 +0000
 @@ -41,6 +41,8 @@
  extern "C" {
  #endif
@@ -19,12 +19,15 @@
  /*
   * Note that buffers can be in one of 6 states:
   *	ARC_anon	- anonymous (discussed below)
-@@ -507,6 +509,8 @@
+@@ -507,6 +509,11 @@
  	 */
  	uint16_t		b_lsize;	/* immutable */
  	uint64_t		b_spa;		/* immutable */
-+	/* QoS: per-dataset ARC accounting (Phase A) */
-+	struct dsl_dataset	*b_dataset;	/* NULL = MOS or unresolved */
++	/*
++	 * QoS AZ-patch52: b_dataset (per-dataset ARC accounting) removed —
++	 * raw dsl_dataset_t pointer outlived the dataset (long holds do not
++	 * pin the memory) and caused use-after-free writes.
++	 */
  
  	/* L2ARC fields. Undefined when not in L2ARC. */
  	l2arc_buf_hdr_t		b_l2hdr;
@@ -42,7 +45,7 @@
  };
  
 --- zfs-2.4.1/include/sys/dsl_dataset.h	2026-02-24 20:50:55.792270069 +0000
-+++ zfs-2.4.1-qos/include/sys/dsl_dataset.h	2026-04-14 20:39:24.049382424 +0000
++++ zfs-2.4.1-qos/include/sys/dsl_dataset.h	2026-07-09 23:10:46.506190520 +0000
 @@ -40,6 +40,7 @@
  #include <sys/zfs_refcount.h>
  #include <sys/rrwlock.h>
@@ -59,7 +62,7 @@
  
  #define	DS_FLAG_INCONSISTENT	(1ULL<<0)
  #define	DS_IS_INCONSISTENT(ds)	\
-@@ -266,6 +268,15 @@
+@@ -266,6 +268,18 @@
  	 */
  	void *ds_feature_activation[SPA_FEATURES];
  
@@ -69,13 +72,16 @@
 +	/* QoS: per-dataset dirty data quota (F-patch05) */
 +	uint64_t ds_dirty_quota;	/* 0 = unlimited (no QoS BW) */
 +	uint64_t ds_dirty_bytes;	/* current dirty bytes (atomic) */
-+	/* QoS: bytes currently in L1ARC for this dataset (G-patch06) */
-+	uint64_t ds_arc_bytes;		/* atomic; no lock needed */
++	/*
++	 * QoS AZ-patch52: ds_arc_bytes (G-patch06 L1ARC accounting) removed.
++	 * It was written through dangling arc_buf_hdr_t.b_dataset pointers
++	 * after this struct was freed (SLUB corruption) and had no readers.
++	 */
 +
  	/* Protected by ds_lock; keep at end of struct for better locality */
  	char ds_snapname[ZFS_MAX_DATASET_NAME_LEN];
  } dsl_dataset_t;
-@@ -511,6 +522,10 @@
+@@ -511,6 +525,10 @@
  int dsl_dataset_oldest_snapshot(spa_t *spa, uint64_t head_ds, uint64_t min_txg,
      uint64_t *oldest_dsobj);
  
@@ -87,13 +93,20 @@
  #define	dprintf_ds(ds, fmt, ...) do { \
  	if (zfs_flags & ZFS_DEBUG_DPRINTF) { \
 --- zfs-2.4.1/include/sys/dsl_pool.h	2026-02-24 20:50:55.792270069 +0000
-+++ zfs-2.4.1-qos/include/sys/dsl_pool.h	2026-04-29 06:52:21.261929177 +0000
-@@ -117,6 +117,24 @@
++++ zfs-2.4.1-qos/include/sys/dsl_pool.h	2026-06-11 15:10:46.843465728 +0000
+@@ -117,6 +117,31 @@
  	kcondvar_t dp_spaceavail_cv;
  	uint64_t dp_dirty_pertxg[TXG_SIZE];
  	uint64_t dp_dirty_total;
 +	/* QoS: sum of qb_bw_rate for all QoS-enabled datasets */
 +	uint64_t dp_qos_total_bw;
++	/*
++	 * AV-patch48: count of QoS-enabled buckets in this pool.  Read
++	 * (relaxed, no barrier) on the ARC miss hot path to skip dataset
++	 * resolution entirely when no dataset has qos:enabled=on.
++	 * Maintained by qos_bucket_enable/disable/fini via atomic_add_64.
++	 */
++	uint64_t dp_qos_enabled_count;
 +	/* QoS Boost: per-pool active bucket list (patch08) */
 +	list_t		dp_qos_active_buckets;
 +	kmutex_t	dp_qos_active_lock;
@@ -113,7 +126,7 @@
  	uint64_t dp_long_free_dirty_pertxg[TXG_SIZE];
  	uint64_t dp_mos_used_delta;
  	uint64_t dp_mos_compressed_delta;
-@@ -180,6 +198,7 @@
+@@ -180,6 +205,7 @@
  void dsl_pool_ckpoint_diduse_space(dsl_pool_t *dp,
      int64_t used, int64_t comp, int64_t uncomp);
  boolean_t dsl_pool_need_dirty_delay(dsl_pool_t *dp);
@@ -122,8 +135,8 @@
  void dsl_pool_config_enter_prio(dsl_pool_t *dp, const void *tag);
  void dsl_pool_config_exit(dsl_pool_t *dp, const void *tag);
 --- zfs-2.4.1/include/sys/qos_bucket.h	1970-01-01 00:00:00.000000000 +0000
-+++ zfs-2.4.1-qos/include/sys/qos_bucket.h	2026-04-29 06:52:21.262929173 +0000
-@@ -0,0 +1,154 @@
++++ zfs-2.4.1-qos/include/sys/qos_bucket.h	2026-07-04 23:00:05.270182596 +0000
+@@ -0,0 +1,169 @@
 +/*
 + * CDDL HEADER START
 + *
@@ -251,6 +264,13 @@
 +void qos_bucket_refund(qos_bucket_t *bucket, uint64_t bytes);
 +void qos_bucket_wait_consume(qos_bucket_t *bucket,
 +    qos_io_type_t type, uint64_t io_size);
++/*
++ * AY-patch51: credit throttle wait time measured OUTSIDE qos_bucket.c
++ * (e.g. the dmu_tx_wait() ERESTART/delay(1) loop, sole wait point of the
++ * DMU-level write gate) to the per-direction throttle_ns statistic.
++ */
++void qos_bucket_account_throttle_ns(qos_bucket_t *bucket,
++    qos_io_type_t type, hrtime_t wait_ns);
 +void qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
 +    uint64_t *total_bytes, uint64_t *throttle_count,
 +    uint64_t *throttle_ns, uint64_t *rejected_size);
@@ -272,6 +292,14 @@
 + * hook is skipped.  Published in the qos-boost-wake kstat.
 + */
 +extern uint64_t qos_kstat_tx_objset_null_writes;
++
++/*
++ * AV-patch48: gate for the Z-patch18 diagnostic atomics.  Default 0 so the
++ * patched module has zero measurable overhead vs vanilla when no dataset has
++ * qos:enabled=on.  Set to 1 (module param zfs_qos_debug) to re-enable the
++ * fast-path-hit and objset-null-write probes.  Defined in qos_bucket.c.
++ */
++extern int zfs_qos_debug;
 +
 +#ifdef	__cplusplus
 +}
@@ -410,8 +438,19 @@
  	range_tree.o \
  	refcount.o \
  	rrwlock.o \
+--- zfs-2.4.1/module/Makefile.bsd	2026-02-24 21:09:28.376742240 +0000
++++ zfs-2.4.1-qos/module/Makefile.bsd	2026-06-12 11:49:08.213034395 +0000
+@@ -300,6 +300,8 @@
+ 	multilist.c \
+ 	objlist.c \
+ 	pathname.c \
++	qos_bucket.c \
++	qos_kstat.c \
+ 	range_tree.c \
+ 	refcount.c \
+ 	rrwlock.c \
 --- zfs-2.4.1/module/zfs/arc.c	2026-02-24 21:09:27.740745290 +0000
-+++ zfs-2.4.1-qos/module/zfs/arc.c	2026-04-14 20:39:24.050382416 +0000
++++ zfs-2.4.1-qos/module/zfs/arc.c	2026-07-09 23:10:09.850404266 +0000
 @@ -295,6 +295,7 @@
  #include <sys/vdev.h>
  #include <sys/vdev_impl.h>
@@ -420,89 +459,64 @@
  #include <sys/multilist.h>
  #include <sys/abd.h>
  #include <sys/dbuf.h>
-@@ -313,6 +314,14 @@
+@@ -313,6 +314,20 @@
  #include <sys/zfs_racct.h>
  #include <sys/zstd/zstd.h>
  
 +/*
-+ * QoS: tag for per-dataset ARC accounting long holds.  arc_read()
-+ * and arc_evict_hdr() are separate functions so FTAG (= __func__)
-+ * would produce different strings, causing a refcount ASSERT failure
-+ * in debug builds.  Use a shared static string instead.
++ * QoS AZ-patch52: the per-dataset ARC accounting (hdr->b_dataset +
++ * ds_arc_bytes, tagged with "arc_qos_ds_hold" long holds) has been
++ * REMOVED.  A dsl_dataset_long_hold() does not pin the dsl_dataset_t
++ * memory (only the bonus-dbuf hold does), so tagged headers kept raw
++ * pointers to datasets that dsl_dataset_evict_async() could kmem_free
++ * at any time; every later ARC access then executed
++ * atomic_add_64(&freed_ds->ds_arc_bytes, lsize) — reproducible SLUB
++ * corruption under the S3/CIFS suites (poison overwritten at the
++ * ds_arc_bytes offset, +4096/+131072 single-field increments).
++ * ds_arc_bytes had no consumer anywhere in the tree, so the whole
++ * mechanism is deleted rather than re-plumbed with real holds.
 + */
-+static const char arc_qos_tag[] = "arc_qos_ds_hold";
 +
  #ifndef _KERNEL
  /* set with ZFS_DEBUG=watch, to enable watchpoints on frozen buffers */
  boolean_t arc_watch = B_FALSE;
-@@ -3317,6 +3326,7 @@
- 	hdr->b_l1hdr.b_mfu_hits = 0;
- 	hdr->b_l1hdr.b_mfu_ghost_hits = 0;
- 	hdr->b_l1hdr.b_buf = NULL;
-+	hdr->b_dataset = NULL;
- 
- 	ASSERT(zfs_refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
- 
-@@ -3779,6 +3789,19 @@
+@@ -3779,6 +3794,8 @@
  	ASSERT0P(hdr->b_l1hdr.b_buf);
  	ASSERT0(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt));
  
-+	/* QoS: decrement per-dataset ARC accounting */
-+	if (hdr->b_dataset != NULL) {
-+		uint64_t lsize = HDR_GET_LSIZE(hdr);
-+		uint64_t old, new_val;
-+		do {
-+			old = hdr->b_dataset->ds_arc_bytes;
-+			new_val = (old >= lsize) ? old - lsize : 0;
-+		} while (atomic_cas_64(&hdr->b_dataset->ds_arc_bytes,
-+		    old, new_val) != old);
-+		dsl_dataset_long_rele(hdr->b_dataset, arc_qos_tag);
-+		hdr->b_dataset = NULL;
-+	}
++	/* QoS AZ-patch52: per-dataset ARC accounting removed (see top). */
 +
  	*real_evicted = 0;
  	state = hdr->b_l1hdr.b_state;
  	if (GHOST_STATE(state)) {
-@@ -5393,6 +5416,10 @@
+@@ -5393,6 +5410,7 @@
  			DTRACE_PROBE1(new_state__mru, arc_buf_hdr_t *, hdr);
  		}
  		arc_change_state(new_state, hdr);
-+		/* QoS: track ARC bytes per dataset on first insertion */
-+		if (hdr->b_dataset != NULL)
-+			atomic_add_64(&hdr->b_dataset->ds_arc_bytes,
-+			    HDR_GET_LSIZE(hdr));
++		/* QoS AZ-patch52: per-dataset ARC accounting removed. */
  	} else if (hdr->b_l1hdr.b_state == arc_mru) {
  		/*
  		 * This buffer has been accessed once recently and either
-@@ -6118,6 +6145,32 @@
+@@ -6118,6 +6136,23 @@
  			hdr = arc_hdr_alloc(guid, psize, lsize,
  			    BP_IS_PROTECTED(bp), BP_GET_COMPRESS(bp), 0, type);
  
 +			/*
-+			 * QoS: resolve dataset for per-dataset ARC
-+			 * accounting.  Skip in sync context to avoid
-+			 * deadlock on dp_config_rwlock (held for
-+			 * write by the sync thread).
++			 * QoS AZ-patch52: the per-dataset ARC tagging that
++			 * lived here (dsl_dataset_hold_obj on every ARC
++			 * miss, long_hold + hdr->b_dataset raw pointer) has
++			 * been removed.  Beyond the use-after-free described
++			 * at the top of this file, the hook itself was the
++			 * churn generator: it LOADED not-in-memory datasets
++			 * from the ZIO read-interrupt path (z_rd_int →
++			 * arc_read → dsl_dataset_hold_obj → dsl_dir_hold_obj
++			 * → zap_value_search), and the transient
++			 * dsl_dataset_t incarnations it created were evicted
++			 * seconds later with the ARC tags still pointing at
++			 * them (AZ52 canary: dozens of "UAF-WINDOW ...
++			 * longholds>0 arc_bytes>0" evictions per second
++			 * under CIFS load).
 +			 */
-+			if (zb != NULL && zb->zb_objset != 0) {
-+				dsl_pool_t *dp = spa_get_dsl(spa);
-+				if (dp != NULL &&
-+				    !dsl_pool_sync_context(dp)) {
-+					dsl_dataset_t *ds;
-+					dsl_pool_config_enter(dp, FTAG);
-+					if (dsl_dataset_hold_obj(dp,
-+					    zb->zb_objset, FTAG,
-+					    &ds) == 0) {
-+						if (!ds->ds_is_snapshot) {
-+							dsl_dataset_long_hold(
-+							    ds, arc_qos_tag);
-+							hdr->b_dataset = ds;
-+						}
-+						dsl_dataset_rele(ds, FTAG);
-+					}
-+					dsl_pool_config_exit(dp, FTAG);
-+				}
-+			}
 +
  			if (!embedded_bp) {
  				hdr->b_dva = *BP_IDENTITY(bp);
@@ -639,7 +653,7 @@
  }
  
 --- zfs-2.4.1/module/zfs/dmu_tx.c	2026-02-24 21:09:27.821744902 +0000
-+++ zfs-2.4.1-qos/module/zfs/dmu_tx.c	2026-04-29 06:52:21.259929183 +0000
++++ zfs-2.4.1-qos/module/zfs/dmu_tx.c	2026-07-04 23:00:32.222044928 +0000
 @@ -40,6 +40,7 @@
  #include <sys/sa.h>
  #include <sys/sa_impl.h>
@@ -648,7 +662,7 @@
  #include <sys/trace_zfs.h>
  
  typedef void (*dmu_tx_hold_func_t)(dmu_tx_t *tx, struct dnode *dn,
-@@ -1133,6 +1134,52 @@
+@@ -1133,6 +1134,57 @@
  		tohold += zfs_refcount_count(&txh->txh_memory_tohold);
  	}
  
@@ -694,14 +708,19 @@
 +		 * writes reach dmu_tx_try_assign() through a path that
 +		 * leaves tx_objset unset.  Diagnostic only: no behaviour
 +		 * change, no fallback throttle.
++		 *
++		 * AV-patch48: gated behind zfs_qos_debug (declared in
++		 * sys/qos_bucket.h, already included) so this global atomic is
++		 * never touched on the QoS-off write path.
 +		 */
-+		atomic_add_64(&qos_kstat_tx_objset_null_writes, 1);
++		if (zfs_qos_debug)
++			atomic_add_64(&qos_kstat_tx_objset_null_writes, 1);
 +	}
 +
  	/* needed allocation: worst-case estimate of write space */
  	uint64_t asize = spa_get_worst_case_asize(tx->tx_pool->dp_spa, towrite);
  	/* calculate memory footprint estimate */
-@@ -1183,6 +1230,24 @@
+@@ -1183,6 +1235,24 @@
  
  	tx->tx_lasttried_txg = tx->tx_txg;
  	tx->tx_txg = 0;
@@ -726,7 +745,7 @@
  }
  
  /*
-@@ -1344,7 +1409,36 @@
+@@ -1344,7 +1414,53 @@
  
  	before = gethrtime();
  
@@ -741,7 +760,24 @@
 +		 */
 +		tx->tx_qos_throttled = B_FALSE;
 +		delay(1);
-+		spa_tx_assign_add_nsecs(spa, gethrtime() - before);
++		hrtime_t qos_waited = gethrtime() - before;
++		/*
++		 * AY-patch51: this loop is the only wait point of the
++		 * DMU-level write gate — credit the blocked time to
++		 * stat_throttle_ns_write (direction is always WRITE here:
++		 * tx_qos_throttled is set exclusively by the QOS_IO_WRITE
++		 * try_consume in dmu_tx_try_assign).  Reuses the clock
++		 * reads already needed by spa_tx_assign_add_nsecs.
++		 */
++		if (tx->tx_objset != NULL) {
++			dsl_dataset_t *qds = dmu_objset_ds(tx->tx_objset);
++			if (qds != NULL && !qds->ds_is_snapshot &&
++			    qds->ds_qos.qb_enabled) {
++				qos_bucket_account_throttle_ns(&qds->ds_qos,
++				    QOS_IO_WRITE, qos_waited);
++			}
++		}
++		spa_tx_assign_add_nsecs(spa, qos_waited);
 +		return;
 +	}
 +
@@ -763,7 +799,7 @@
  		uint64_t dirty;
  
  		/*
-@@ -1430,6 +1524,14 @@
+@@ -1430,6 +1546,14 @@
  	ASSERT(tx->tx_txg != 0);
  
  	/*
@@ -779,8 +815,32 @@
  	 * associated dnodes, notifying waiters if no holds remain.
  	 */
 --- zfs-2.4.1/module/zfs/dsl_dataset.c	2026-02-24 21:09:27.840744811 +0000
-+++ zfs-2.4.1-qos/module/zfs/dsl_dataset.c	2026-04-29 06:52:21.257929191 +0000
-@@ -498,6 +498,8 @@
++++ zfs-2.4.1-qos/module/zfs/dsl_dataset.c	2026-07-11 08:25:16.758440881 +0000
+@@ -464,6 +464,23 @@
+ 
+ 	ASSERT0P(ds->ds_owner);
+ 
++	/*
++	 * AZ-patch52 sentinel: a dsl_dataset_t must never be freed while
++	 * long holds are outstanding — every holder is expected to also
++	 * hold the bonus dbuf, which pins this memory.  The removed ARC
++	 * b_dataset tagging violated exactly this (long_hold without a
++	 * dbuf hold) and produced use-after-free writes.  Fires only on
++	 * eviction, so the cost is nil; a hit means a new lifetime bug.
++	 */
++	if (zfs_refcount_count(&ds->ds_longholds) != 0) {
++		zfs_dbgmsg("AZ52 UAF-WINDOW: evict ds %llu longholds=%lld "
++		    "qb_enabled=%d on_active_list=%d",
++		    (u_longlong_t)ds->ds_object,
++		    (longlong_t)zfs_refcount_count(&ds->ds_longholds),
++		    (int)ds->ds_qos.qb_enabled,
++		    (int)ds->ds_qos.qb_on_active_list);
++	}
++
+ 	ds->ds_dbuf = NULL;
+ 
+ 	if (ds->ds_objset != NULL)
+@@ -498,6 +515,8 @@
  	mutex_destroy(&ds->ds_remap_deadlist_lock);
  	zfs_refcount_destroy(&ds->ds_longholds);
  	rrw_destroy(&ds->ds_bp_rwlock);
@@ -789,7 +849,7 @@
  
  	kmem_free(ds, sizeof (dsl_dataset_t));
  }
-@@ -595,6 +597,225 @@
+@@ -595,6 +614,243 @@
  	return (result);
  }
  
@@ -916,6 +976,18 @@
 +	boolean_t has_rates = (iops_read_rate > 0 || iops_write_rate > 0 ||
 +	    bw_read_rate > 0 || bw_write_rate > 0);
 +
++	/*
++	 * AV-patch48: bind the bucket to its pool BEFORE enable/disable.
++	 * qos_bucket_enable() now reads qb_pool to maintain the per-pool
++	 * dp_qos_enabled_count; previously qb_pool was assigned further
++	 * below (after the enable call), so on the first enable it was
++	 * still NULL and the count was never incremented.  This assignment
++	 * is idempotent and the value is otherwise only used by the active
++	 * list / wake-thread bookkeeping, so moving it up is side-effect
++	 * free.
++	 */
++	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
++
 +	if (has_rates && qos_enabled) {
 +		qos_bucket_configure_split(&ds->ds_qos,
 +		    iops_read_rate, bw_read_rate,
@@ -930,9 +1002,6 @@
 +	}
 +
 +	/* QoS Boost: apply boost config per direction (patch08 + Q-patch10) */
-+	ds->ds_qos.qb_boost_factor = boost_factor;
-+	ds->ds_qos.qb_boost_pool =
-+	    (boost_pool_val != 0) ? B_TRUE : B_FALSE;
 +	/*
 +	 * QoS Boost caps — token storage limit (P-patch08).
 +	 *
@@ -944,7 +1013,18 @@
 +	 * Throughput is self-regulated: donors donate in bursts (~1×/sec),
 +	 * and try_consume() only uses boost for the shortfall after
 +	 * normal tokens are exhausted, preventing drain+refill cycling.
++	 *
++	 * AZ-patch52: all boost fields (factor, pool flag, 4 caps) are now
++	 * written under qb_lock.  The wake thread reads qb_boost_factor in
++	 * pass 1 and the caps in pass 2 under qb_lock, and try_consume()
++	 * reads them under qb_lock; writing them lock-free here violated
++	 * the "qos_token_bucket_t mutations only under qb_lock" invariant
++	 * kept everywhere else (Curator hypothesis 4, confirmed data race).
 +	 */
++	mutex_enter(&ds->ds_qos.qb_lock);
++	ds->ds_qos.qb_boost_factor = boost_factor;
++	ds->ds_qos.qb_boost_pool =
++	    (boost_pool_val != 0) ? B_TRUE : B_FALSE;
 +	ds->ds_qos.qb_read.tb_boost_bw_cap =
 +	    (boost_factor > 0 &&
 +	    bw_read_rate > INT64_MAX / (int64_t)boost_factor) ?
@@ -961,12 +1041,10 @@
 +	    (boost_factor > 0 &&
 +	    iops_write_rate > INT64_MAX / (int64_t)boost_factor) ?
 +	    INT64_MAX : (int64_t)boost_factor * iops_write_rate;
-+	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
-+
 +	/* QoS Unify: apply count_arc_hits config (O-patch09) */
-+	mutex_enter(&ds->ds_qos.qb_lock);
 +	ds->ds_qos.qb_count_arc_hits = count_arc_hits;
 +	mutex_exit(&ds->ds_qos.qb_lock);
++	/* AV-patch48: qb_pool now assigned above, before enable/disable. */
 +
 +	/*
 +	 * If boost_pool=1 is set on an enabled bucket, add it to the
@@ -1015,7 +1093,7 @@
  int
  dsl_dataset_hold_obj(dsl_pool_t *dp, uint64_t dsobj, const void *tag,
      dsl_dataset_t **dsp)
-@@ -623,6 +844,8 @@
+@@ -623,6 +879,8 @@
  		dsl_dataset_t *winner = NULL;
  
  		ds = kmem_zalloc(sizeof (dsl_dataset_t), KM_SLEEP);
@@ -1024,19 +1102,56 @@
  		ds->ds_dbuf = dbuf;
  		ds->ds_object = dsobj;
  		ds->ds_is_snapshot = dsl_dataset_phys(ds)->ds_num_children != 0;
-@@ -698,6 +921,11 @@
+@@ -698,6 +956,25 @@
  			ds->ds_reserved = ds->ds_quota = 0;
  		}
  
-+		/* QoS: configure token bucket + kstat for non-snapshots. */
-+		if (err == 0 && !ds->ds_is_snapshot) {
-+			qos_prop_apply(ds);
-+		}
++		/*
++		 * AZ-patch52 cycle 2: qos_prop_apply() used to be called
++		 * here, BEFORE the dmu_buf_set_user_ie() winner/loser
++		 * resolution below.  A losing copy of a concurrently loaded
++		 * dataset thus added its bw_write_rate to dp_qos_total_bw
++		 * (qos_prop_apply pool-wide dirty quota block) and was then
++		 * destroyed without ever removing it (qos_bucket_fini does
++		 * not touch dp_qos_total_bw) — permanent, cumulative
++		 * overestimation of the pool total on every concurrent-load
++		 * race.  The call now happens on the published dataset only
++		 * (else branch below), so a loser never touches pool-wide
++		 * state.  Nothing between this point and the else branch
++		 * reads ds_qos (deadlist open, crypto errata,
++		 * dmu_buf_init_user — verified), and the bucket stays in its
++		 * qos_bucket_init() default (disabled → try_consume
++		 * fast-path QOS_OK) for the few instructions until it is
++		 * configured.
++		 */
 +
  		if (err == 0 && ds->ds_dir->dd_crypto_obj != 0 &&
  		    ds->ds_is_snapshot &&
  		    zap_contains(mos, dsobj, DS_FIELD_IVSET_GUID) != 0) {
-@@ -747,6 +975,8 @@
+@@ -738,6 +1015,22 @@
+ 					unload_zfeature(ds, f);
+ 			}
+ 
++			/*
++			 * AZ-patch52 diagnostic: concurrent-load loser
++			 * teardown (two threads raced dsl_dataset_hold_obj
++			 * on the same object; this copy lost
++			 * dmu_buf_set_user_ie and is freed immediately).
++			 * Cycle 2: qos_prop_apply() no longer runs on this
++			 * copy (moved after winner resolution), so
++			 * qb_enabled/on_active_list must always log 0/0 here
++			 * and dp_qos_total_bw is untouched by the loser.
++			 */
++			zfs_dbgmsg("AZ52 loser-race: ds %llu err=%d "
++			    "qb_enabled=%d on_active_list=%d",
++			    (u_longlong_t)ds->ds_object, err,
++			    (int)ds->ds_qos.qb_enabled,
++			    (int)ds->ds_qos.qb_on_active_list);
++
+ 			list_destroy(&ds->ds_prop_cbs);
+ 			list_destroy(&ds->ds_sendstreams);
+ 			bplist_destroy(&ds->ds_pending_deadlist);
+@@ -747,6 +1040,8 @@
  			mutex_destroy(&ds->ds_remap_deadlist_lock);
  			zfs_refcount_destroy(&ds->ds_longholds);
  			rrw_destroy(&ds->ds_bp_rwlock);
@@ -1045,6 +1160,28 @@
  			kmem_free(ds, sizeof (dsl_dataset_t));
  			if (err != 0) {
  				dmu_buf_rele(dbuf, tag);
+@@ -766,6 +1061,21 @@
+ 				    spa_name(dp->dp_spa),
+ 				    (u_longlong_t)dsobj);
+ 			}
++			/*
++			 * QoS: configure token bucket + kstat for
++			 * non-snapshots.  AZ-patch52 cycle 2: called on the
++			 * PUBLISHED dataset only (this thread won
++			 * dmu_buf_set_user_ie above; err == 0 in this
++			 * branch), so dp_qos_total_bw is only ever fed by
++			 * datasets that survive — the loser path above never
++			 * calls it.  A concurrent holder that grabs the
++			 * winner before this call runs sees the
++			 * qos_bucket_init() default (disabled bucket,
++			 * try_consume fast-path) for a few microseconds —
++			 * same window the loser thread always had.
++			 */
++			if (!ds->ds_is_snapshot)
++				qos_prop_apply(ds);
+ 		}
+ 	}
+ 
 --- zfs-2.4.1/module/zfs/dsl_pool.c	2026-02-24 21:09:27.856744734 +0000
 +++ zfs-2.4.1-qos/module/zfs/dsl_pool.c	2026-04-29 06:52:21.258929187 +0000
 @@ -51,6 +51,7 @@
@@ -1203,8 +1340,8 @@
  
  int
 --- zfs-2.4.1/module/zfs/qos_bucket.c	1970-01-01 00:00:00.000000000 +0000
-+++ zfs-2.4.1-qos/module/zfs/qos_bucket.c	2026-04-29 06:52:21.256929195 +0000
-@@ -0,0 +1,1233 @@
++++ zfs-2.4.1-qos/module/zfs/qos_bucket.c	2026-07-04 23:50:37.036017770 +0000
+@@ -0,0 +1,1386 @@
 +/*
 + * CDDL HEADER START
 + *
@@ -1299,6 +1436,17 @@
 +uint64_t        qos_kstat_tx_objset_null_writes   = 0;
 +static kstat_t *qos_wake_kstat = NULL;
 +
++/*
++ * AV-patch48: master gate for the Z-patch18 diagnostic atomics.  These
++ * counters (fastpath_hit_write, tx_objset_null_writes) live on hot paths
++ * that execute even when QoS is disabled, so an unconditional atomic_add_64
++ * causes cache-line bouncing across CPUs for zero functional benefit.
++ * Default 0 => the probes compile in but are never touched on the
++ * QoS-off fast path, giving parity with vanilla 2.4.1.  Operators can set
++ * zfs_qos_debug=1 to restore the Phase E observability.
++ */
++int zfs_qos_debug = 0;
++
 +typedef struct qos_wake_kstat {
 +	kstat_named_t qwk_surplus_collected;
 +	kstat_named_t qwk_surplus_distributed;
@@ -1352,12 +1500,15 @@
 + * Refill tokens for one dimension.
 + * Returns surplus tokens that exceeded burst (available for boost).
 + * Called under qb_lock.
++ *
++ * AW-patch49: the wall-clock sample `now` is supplied by the caller so a
++ * single gethrtime() can be shared across the two (try_consume) or four
++ * (wake thread) refills of one bucket pass, instead of one read each.
 + */
 +static inline int64_t
 +qos_refill_with_surplus(int64_t *tokens, int64_t rate,
-+    int64_t burst, hrtime_t *last_fill)
++    int64_t burst, hrtime_t *last_fill, hrtime_t now)
 +{
-+	hrtime_t now = gethrtime();
 +	hrtime_t elapsed = now - *last_fill;
 +	int64_t surplus = 0;
 +
@@ -1419,13 +1570,27 @@
 +{
 +	list_t drain;
 +	qos_waiter_t *w;
++	boolean_t was_enabled;
 +
 +	list_create(&drain, sizeof (qos_waiter_t),
 +	    offsetof(qos_waiter_t, qw_node));
 +
 +	/* Collect waiters under lock. */
 +	mutex_enter(&bucket->qb_lock);
++	was_enabled = bucket->qb_enabled;
 +	bucket->qb_enabled = B_FALSE;
++	/*
++	 * AV-patch48: a bucket can be torn down while still enabled (dataset
++	 * eviction without an explicit qos:enabled=off).  Decrement here so
++	 * dp_qos_enabled_count never leaks above zero, which would otherwise
++	 * keep the ARC miss path resolving datasets forever.
++	 *
++	 * AV-patch48 cycle 2: done under qb_lock (atomic with the qb_enabled
++	 * transition) so the count can never transiently disagree with the
++	 * flag — see qos_bucket_enable for the rationale.
++	 */
++	if (was_enabled && bucket->qb_pool != NULL)
++		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, -1ULL);
 +	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
 +		list_insert_tail(&drain, w);
 +	bucket->qb_waiter_count = 0;
@@ -1493,8 +1658,29 @@
 +void
 +qos_bucket_enable(qos_bucket_t *bucket)
 +{
++	boolean_t was_enabled;
++
 +	mutex_enter(&bucket->qb_lock);
++	was_enabled = bucket->qb_enabled;
 +	bucket->qb_enabled = B_TRUE;
++	/*
++	 * AV-patch48: bump the per-pool enabled-bucket count on the OFF->ON
++	 * edge only.  dsl_dataset_set_qos_sync() can call this repeatedly
++	 * while already enabled (rate changes), so the was_enabled guard
++	 * keeps the count exact.  qb_pool is assigned before this call (see
++	 * dsl_dataset.c AV-patch48 reorder), so it is non-NULL here.
++	 *
++	 * AV-patch48 cycle 2: the increment is done while still holding
++	 * qb_lock so the count update is atomic with the qb_enabled
++	 * transition.  Without this, a concurrent enable/disable on the same
++	 * bucket could observe qb_enabled and dp_qos_enabled_count out of
++	 * sync between mutex_exit and the atomic, causing a transient
++	 * under/overshoot of the count.  atomic_add_64 never sleeps and
++	 * dp_qos_enabled_count is otherwise lock-free (relaxed read in
++	 * arc.c), so no lock-ordering hazard is introduced.
++	 */
++	if (!was_enabled && bucket->qb_pool != NULL)
++		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, 1);
 +	mutex_exit(&bucket->qb_lock);
 +}
 +
@@ -1503,13 +1689,26 @@
 +{
 +	list_t drain;
 +	qos_waiter_t *w;
++	boolean_t was_enabled;
 +
 +	list_create(&drain, sizeof (qos_waiter_t),
 +	    offsetof(qos_waiter_t, qw_node));
 +
 +	/* Collect waiters under lock. */
 +	mutex_enter(&bucket->qb_lock);
++	was_enabled = bucket->qb_enabled;
 +	bucket->qb_enabled = B_FALSE;
++	/*
++	 * AV-patch48: decrement on the ON->OFF edge only (guard mirrors
++	 * qos_bucket_enable).  This is what lets the ARC miss path stop
++	 * resolving datasets once the last QoS dataset is turned off.
++	 *
++	 * AV-patch48 cycle 2: done under qb_lock (atomic with the qb_enabled
++	 * transition) so the count can never transiently disagree with the
++	 * flag — see qos_bucket_enable for the rationale.
++	 */
++	if (was_enabled && bucket->qb_pool != NULL)
++		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, -1ULL);
 +	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
 +		list_insert_tail(&drain, w);
 +	bucket->qb_waiter_count = 0;
@@ -1565,8 +1764,11 @@
 +		 * A non-zero value while buffered writes throttle but O_DIRECT
 +		 * writes do not would indicate a qb_enabled race specific to
 +		 * the O_DIRECT path.
++		 *
++		 * AV-patch48: gated behind zfs_qos_debug so the QoS-off fast
++		 * path performs no global atomic (zero cache-line bouncing).
 +		 */
-+		if (type == QOS_IO_WRITE)
++		if (zfs_qos_debug && type == QOS_IO_WRITE)
 +			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
 +		return (QOS_OK);
 +	}
@@ -1578,8 +1780,10 @@
 +		 * Z-patch18 cycle 1 (H4 probe): race-window fast-path hit
 +		 * where disable landed between the lock-free read and the
 +		 * slow-path acquire.  Count it under the same H4 counter.
++		 *
++		 * AV-patch48: gated behind zfs_qos_debug (see fast-path above).
 +		 */
-+		if (type == QOS_IO_WRITE)
++		if (zfs_qos_debug && type == QOS_IO_WRITE)
 +			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
 +		mutex_exit(&bucket->qb_lock);
 +		return (QOS_OK);
@@ -1593,7 +1797,14 @@
 +	 * a reject on io_size_max is still counted (H1 is a pure entry
 +	 * counter, not a success counter).
 +	 */
-+	if (type == QOS_IO_WRITE) {
++	/*
++	 * AW-patch49: these are file-scope global counters; an unconditional
++	 * atomic_add_64 on every throttled-path WRITE bounces the cache line
++	 * across every CPU servicing any throttled dataset.  Gate behind
++	 * zfs_qos_debug so the enabled hot path pays nothing by default; the
++	 * H1/H2 probes are still available under zfs_qos_debug=1.
++	 */
++	if (zfs_qos_debug && type == QOS_IO_WRITE) {
 +		if (io_size > 0)
 +			atomic_add_64(&qos_kstat_consume_called_write, 1);
 +		else
@@ -1603,7 +1814,8 @@
 +	/* Check io_size_max before refill — hard reject. */
 +	if (bucket->qb_io_size_max != 0 &&
 +	    io_size > bucket->qb_io_size_max) {
-+		atomic_add_64(&bucket->qb_stat_rejected_size, 1);
++		/* AW-patch49: plain increment — written only under qb_lock. */
++		bucket->qb_stat_rejected_size++;
 +		mutex_exit(&bucket->qb_lock);
 +		return (QOS_IO_TOO_LARGE);
 +	}
@@ -1611,13 +1823,19 @@
 +	/* QoS R/W split: select direction sub-bucket (Q-patch10) */
 +	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
 +
++	/*
++	 * AW-patch49: one gethrtime() per try_consume, shared by both
++	 * refills and the last-consume timestamp below (was a separate
++	 * clock read inside each refill plus one for qb_last_consume_time).
++	 */
++	hrtime_t now = gethrtime();
 +	/* Lazy refill both dimensions (surplus ignored in fast path). */
 +	(void) qos_refill_with_surplus(&tb->tb_iops_tokens,
 +	    tb->tb_iops_rate, tb->tb_iops_burst,
-+	    &tb->tb_iops_last_fill);
++	    &tb->tb_iops_last_fill, now);
 +	(void) qos_refill_with_surplus(&tb->tb_bw_tokens,
 +	    tb->tb_bw_rate, tb->tb_bw_burst,
-+	    &tb->tb_bw_last_fill);
++	    &tb->tb_bw_last_fill, now);
 +
 +	/* Check tokens.  Rate == 0 means "unlimited" for that dimension. */
 +	boolean_t iops_ok = (tb->tb_iops_rate == 0) ||
@@ -1665,15 +1883,16 @@
 +						    (int64_t)io_size;
 +					}
 +				}
-+				atomic_add_64(&tb->tb_stat_total_ios, 1);
-+				atomic_add_64(&tb->tb_stat_total_bytes,
-+				    io_size);
-+				bucket->qb_last_consume_time = gethrtime();
++				/* AW-patch49: plain increments under qb_lock. */
++				tb->tb_stat_total_ios++;
++				tb->tb_stat_total_bytes += io_size;
++				bucket->qb_last_consume_time = now;
 +				mutex_exit(&bucket->qb_lock);
 +				return (QOS_OK);
 +			}
 +		}
-+		atomic_add_64(&tb->tb_stat_throttle_count, 1);
++		/* AW-patch49: plain increment under qb_lock. */
++		tb->tb_stat_throttle_count++;
 +		ret = QOS_THROTTLED;
 +	} else {
 +		/* Consume only dimensions that have a rate set. */
@@ -1681,10 +1900,11 @@
 +			tb->tb_iops_tokens -= 1;
 +		if (tb->tb_bw_rate > 0)
 +			tb->tb_bw_tokens -= (int64_t)io_size;
-+		atomic_add_64(&tb->tb_stat_total_ios, 1);
-+		atomic_add_64(&tb->tb_stat_total_bytes, io_size);
++		/* AW-patch49: plain increments under qb_lock. */
++		tb->tb_stat_total_ios++;
++		tb->tb_stat_total_bytes += io_size;
 +		/* Track last consume time for idle detection. */
-+		bucket->qb_last_consume_time = gethrtime();
++		bucket->qb_last_consume_time = now;
 +		ret = QOS_OK;
 +	}
 +
@@ -1713,7 +1933,9 @@
 +			bucket->qb_on_active_list = B_TRUE;
 +			/* X-patch16: wake-on-demand per-pool signal. */
 +			cv_signal(&pool->dp_qos_wake_cv);
-+			atomic_add_64(&qos_kstat_signaled_early, 1);
++			/* AW-patch49: global counter gated behind debug. */
++			if (zfs_qos_debug)
++				atomic_add_64(&qos_kstat_signaled_early, 1);
 +		}
 +		mutex_exit(&bucket->qb_lock);
 +		mutex_exit(&pool->dp_qos_active_lock);
@@ -1763,6 +1985,15 @@
 +{
 +	int retries = 0;
 +	qos_result_t qr;
++	/*
++	 * AY-patch51: wait-time accounting for the synchronous path.
++	 * wait_start == 0 means "never throttled" (gethrtime() is a
++	 * monotonic clock that never returns 0 post-boot).  The clock is
++	 * read once at first throttle and once at exit — never per retry
++	 * (AW-patch49: one gethrtime() per try_consume preserved).
++	 */
++	hrtime_t wait_start = 0;
++	qos_token_bucket_t *tb;
 +
 +	/* T-patch12: guard against signed/unsigned cast overflow */
 +	VERIFY3U(io_size, <=, SPA_MAXBLOCKSIZE);
@@ -1781,7 +2012,13 @@
 +	do {
 +		qr = qos_bucket_try_consume(bucket, type, io_size);
 +		if (qr != QOS_THROTTLED)
-+			return;
++			break;
++		/*
++		 * AY-patch51: fast path (success on first try) never reaches
++		 * this point, so the clock read below costs nothing there.
++		 */
++		if (wait_start == 0)
++			wait_start = gethrtime();
 +		/* Wait for token refill instead of busy-polling */
 +		mutex_enter(&bucket->qb_lock);
 +		if (!bucket->qb_enabled) {
@@ -1792,6 +2029,57 @@
 +		    ddi_get_lbolt() + MSEC_TO_TICK(10));
 +		mutex_exit(&bucket->qb_lock);
 +	} while (++retries < max_retries);
++
++	if (wait_start == 0)
++		return;
++
++	/*
++	 * AY-patch51: credit the time this thread spent blocked to the
++	 * sub-bucket matching the I/O direction (same resolution as
++	 * try_consume).  Also credited on max_retries exhaustion: the I/O
++	 * proceeds degraded but the thread really was blocked for the
++	 * whole retry budget — throttle_ns measures "time spent blocked",
++	 * not "time until tokens were granted".
++	 */
++	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
++	hrtime_t wait_ns = gethrtime() - wait_start;
++	/*
++	 * AY-patch51 cycle 2: same guard as qos_bucket_account_throttle_ns()
++	 * — gethrtime() is monotonic so this never fires in practice; kept
++	 * for consistency between the two throttle_ns writer sites.
++	 */
++	if (wait_ns <= 0)
++		return;
++	mutex_enter(&bucket->qb_lock);
++	/* AW-patch49: plain increment under qb_lock. */
++	tb->tb_stat_throttle_ns_total += wait_ns;
++	mutex_exit(&bucket->qb_lock);
++}
++
++/*
++ * qos_bucket_account_throttle_ns — credit throttle wait time measured by a
++ * caller-side wait loop to the per-direction throttle_ns statistic.
++ *
++ * AY-patch51: the DMU-level write gate (dmu_tx_try_assign) does not sleep
++ * in qos_bucket_wait_consume(); its wait point is dmu_tx_wait()'s
++ * ERESTART/delay(1) loop.  Without this hook that blocked time is invisible
++ * to stat_throttle_ns_write.  The caller measures the elapsed time (it
++ * already reads the clock for spa_tx_assign_add_nsecs) — no additional
++ * gethrtime() here, AW-patch49 clock budget preserved.
++ */
++void
++qos_bucket_account_throttle_ns(qos_bucket_t *bucket, qos_io_type_t type,
++    hrtime_t wait_ns)
++{
++	qos_token_bucket_t *tb;
++
++	if (wait_ns <= 0)
++		return;
++	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
++	mutex_enter(&bucket->qb_lock);
++	/* AW-patch49: plain increment under qb_lock. */
++	tb->tb_stat_throttle_ns_total += (uint64_t)wait_ns;
++	mutex_exit(&bucket->qb_lock);
 +}
 +
 +/* QoS R/W split: aggregate stats from both directions (Q-patch10) */
@@ -1894,26 +2182,27 @@
 +				}
 +
 +				/* QoS R/W split: refill both sub-buckets */
++				/* AW-patch49: reuse the wake-cycle `now`. */
 +				int64_t bw_sr = qos_refill_with_surplus(
 +				    &bucket->qb_read.tb_bw_tokens,
 +				    bucket->qb_read.tb_bw_rate,
 +				    bucket->qb_read.tb_bw_burst,
-+				    &bucket->qb_read.tb_bw_last_fill);
++				    &bucket->qb_read.tb_bw_last_fill, now);
 +				int64_t iops_sr = qos_refill_with_surplus(
 +				    &bucket->qb_read.tb_iops_tokens,
 +				    bucket->qb_read.tb_iops_rate,
 +				    bucket->qb_read.tb_iops_burst,
-+				    &bucket->qb_read.tb_iops_last_fill);
++				    &bucket->qb_read.tb_iops_last_fill, now);
 +				int64_t bw_sw = qos_refill_with_surplus(
 +				    &bucket->qb_write.tb_bw_tokens,
 +				    bucket->qb_write.tb_bw_rate,
 +				    bucket->qb_write.tb_bw_burst,
-+				    &bucket->qb_write.tb_bw_last_fill);
++				    &bucket->qb_write.tb_bw_last_fill, now);
 +				int64_t iops_sw = qos_refill_with_surplus(
 +				    &bucket->qb_write.tb_iops_tokens,
 +				    bucket->qb_write.tb_iops_rate,
 +				    bucket->qb_write.tb_iops_burst,
-+				    &bucket->qb_write.tb_iops_last_fill);
++				    &bucket->qb_write.tb_iops_last_fill, now);
 +
 +				/* Collect idle surplus from READ sub-bucket */
 +				if (is_donor &&
@@ -2210,9 +2499,11 @@
 +
 +			/*
 +			 * ── PASS 3: dispatch waiters ──
-+			 * ZIO waiters have no direction (legacy, mostly
-+			 * empty after O-patch09).  Use READ sub-bucket
-+			 * for token checks (conservatif).
++			 * AY-patch51: resolve the waiter's direction from
++			 * zio->io_type (same source the upstream callers use
++			 * to derive qos_io_type_t) instead of hard-coding
++			 * the READ sub-bucket.  A write waiter now checks,
++			 * consumes and accounts against qb_write.
 +			 */
 +			for (bucket = list_head(&pool->dp_qos_active_buckets);
 +			    bucket != NULL; bucket = next) {
@@ -2223,62 +2514,56 @@
 +				while ((w = list_head(&bucket->qb_waiters))
 +				    != NULL) {
 +					uint64_t sz = w->qw_zio->io_size;
++					/*
++					 * AY-patch51: per-direction
++					 * sub-bucket (was qb_read hard-coded
++					 * for checks, tokens and stats).
++					 */
++					qos_token_bucket_t *wtb =
++					    (w->qw_zio->io_type ==
++					    ZIO_TYPE_READ) ?
++					    &bucket->qb_read :
++					    &bucket->qb_write;
 +					boolean_t iok =
-+					    (bucket->qb_read.
-+					    tb_iops_rate == 0) ||
-+					    (bucket->qb_read.
-+					    tb_iops_tokens >= 1) ||
++					    (wtb->tb_iops_rate == 0) ||
++					    (wtb->tb_iops_tokens >= 1) ||
 +					    (bucket->qb_boost_factor > 0 &&
-+					    bucket->qb_read.
-+					    tb_boost_iops_tokens >= 1);
++					    wtb->tb_boost_iops_tokens >= 1);
 +					boolean_t bwok =
-+					    (bucket->qb_read.
-+					    tb_bw_rate == 0) ||
-+					    (bucket->qb_read.tb_bw_tokens >=
++					    (wtb->tb_bw_rate == 0) ||
++					    (wtb->tb_bw_tokens >=
 +					    (int64_t)sz) ||
 +					    (bucket->qb_boost_factor > 0 &&
-+					    bucket->qb_read.
-+					    tb_boost_bw_tokens >=
++					    wtb->tb_boost_bw_tokens >=
 +					    (int64_t)sz);
 +					if (!iok || !bwok)
 +						break;
 +					/* Consume own tokens first, boost */
-+					if (bucket->qb_read.
-+					    tb_iops_rate > 0) {
-+						if (bucket->qb_read.
-+						    tb_iops_tokens >= 1)
-+							bucket->qb_read.
-+							    tb_iops_tokens--;
++					if (wtb->tb_iops_rate > 0) {
++						if (wtb->tb_iops_tokens >= 1)
++							wtb->tb_iops_tokens--;
 +						else
-+							bucket->qb_read.
++							wtb->
 +							    tb_boost_iops_tokens
 +							    --;
 +					}
-+					if (bucket->qb_read.
-+					    tb_bw_rate > 0) {
-+						if (bucket->qb_read.
-+						    tb_bw_tokens >=
++					if (wtb->tb_bw_rate > 0) {
++						if (wtb->tb_bw_tokens >=
 +						    (int64_t)sz)
-+							bucket->qb_read.
-+							    tb_bw_tokens -=
++							wtb->tb_bw_tokens -=
 +							    (int64_t)sz;
 +						else
-+							bucket->qb_read.
++							wtb->
 +							    tb_boost_bw_tokens
 +							    -= (int64_t)sz;
 +					}
-+					atomic_add_64(
-+					    &bucket->qb_read.
-+					    tb_stat_total_ios, 1);
-+					atomic_add_64(
-+					    &bucket->qb_read.
-+					    tb_stat_total_bytes, sz);
++					/* AW-patch49: plain increments under qb_lock. */
++					wtb->tb_stat_total_ios++;
++					wtb->tb_stat_total_bytes += sz;
 +					hrtime_t wait_ns =
 +					    gethrtime() - w->qw_enqueue_time;
-+					atomic_add_64(
-+					    &bucket->qb_read.
-+					    tb_stat_throttle_ns_total,
-+					    wait_ns);
++					wtb->tb_stat_throttle_ns_total
++					    += wait_ns;
 +					list_remove(&bucket->qb_waiters, w);
 +					bucket->qb_waiter_count--;
 +					w->qw_zio->io_qos_waiter = NULL;
@@ -2438,9 +2723,14 @@
 +ZFS_MODULE_PARAM(zfs, zfs_, qos_read_timeout_ms, INT, ZMOD_RW,
 +	"Max milliseconds for a throttled read I/O to wait for tokens "
 +	"(default 10000, floor 100). Set below NFS client timeo value.");
++
++/* AV-patch48: diagnostic probes off by default for zero QoS-off overhead. */
++ZFS_MODULE_PARAM(zfs, zfs_, qos_debug, INT, ZMOD_RW,
++	"Enable QoS diagnostic atomics (fastpath/objset-null probes); "
++	"0=disabled for zero overhead when QoS is off (default).");
 --- zfs-2.4.1/module/zfs/qos_kstat.c	1970-01-01 00:00:00.000000000 +0000
-+++ zfs-2.4.1-qos/module/zfs/qos_kstat.c	2026-04-14 20:39:24.051382408 +0000
-@@ -0,0 +1,312 @@
++++ zfs-2.4.1-qos/module/zfs/qos_kstat.c	2026-06-12 13:53:11.356428286 +0000
+@@ -0,0 +1,318 @@
 +/*
 + * CDDL HEADER START
 + *
@@ -2603,7 +2893,13 @@
 +	int64_t boost_iops_w = bucket->qb_write.tb_boost_iops_tokens;
 +	mutex_exit(&bucket->qb_lock);
 +
-+	/* Cumulative stats (atomic — lockless read OK). */
++	/*
++	 * Cumulative stats — written under qb_lock as plain increments
++	 * (AW-patch49).  Lockless read here is safe: 64-bit aligned loads
++	 * are naturally atomic on x86_64 and arm64, only one writer runs at
++	 * a time (qb_lock), and the counters are monotonic, so a transiently
++	 * stale read is acceptable for statistics.
++	 */
 +	uint64_t total_ios_r = bucket->qb_read.tb_stat_total_ios;
 +	uint64_t total_bytes_r = bucket->qb_read.tb_stat_total_bytes;
 +	uint64_t total_ios_w = bucket->qb_write.tb_stat_total_ios;
@@ -2904,7 +3200,7 @@
  	while (zio->io_stage < ZIO_STAGE_DONE) {
  		enum zio_stage pipeline = zio->io_pipeline;
  		enum zio_stage stage = zio->io_stage;
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/CHANGES.md	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/CHANGES.md	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,172 @@
 +# Y-patch17-stress-1000ds — cycle 2
@@ -3079,7 +3375,7 @@
 +## Rollback
 +
 +Aucun. `safe_rm tests/qos-stress/` si besoin.
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/README.md	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/README.md	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,110 @@
 +# qos-stress — ZFS QoS stress harness (Y-patch17)
@@ -3192,7 +3488,7 @@
 +- No pool creation (the harness expects `testqos` or `testpool` already imported).
 +- No ZFS source modification — this is test infrastructure only.
 +- No automated regression scoring — the Observer agent 357-557 scores reports.
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/create_datasets.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/create_datasets.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,73 @@
 +#!/bin/bash
@@ -3268,7 +3564,7 @@
 +
 +log "done: NB=$NB created=$CREATED skipped=$SKIPPED qos_set=$QOS_SET elapsed=${ELAPSED}s"
 +echo "created=$CREATED skipped=$SKIPPED qos_set=$QOS_SET elapsed=${ELAPSED}s"
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/lib.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/lib.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,87 @@
 +#!/bin/bash
@@ -3358,7 +3654,7 @@
 +log() {
 +    echo "[$(date -u +%H:%M:%S)] $*" >&2
 +}
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/measure_locks.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/measure_locks.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,77 @@
 +#!/bin/bash
@@ -3438,7 +3734,7 @@
 +
 +log "wrote $CSV"
 +cat "$CSV"
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/measure_wake_cpu.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/measure_wake_cpu.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,104 @@
 +#!/bin/bash
@@ -3545,7 +3841,7 @@
 +
 +log "wrote $CSV"
 +cat "$CSV"
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/report.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/report.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,130 @@
 +#!/bin/bash
@@ -3678,7 +3974,7 @@
 +} > "$OUT"
 +
 +echo "wrote $OUT"
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
+--- zfs-2.4.1/tests/qos-stress/run_load.sh	1970-01-01 00:00:00.000000000 +0000
 +++ zfs-2.4.1-qos/tests/qos-stress/run_load.sh	2026-04-29 06:52:21.264929166 +0000
 @@ -0,0 +1,116 @@
 +#!/bin/bash
@@ -3797,9 +4093,9 @@
 +
 +log "fio complete: $REPORTS_DIR/${RUN_ID}_fio.json"
 +echo "run_id=$RUN_ID jobs=$i json=$REPORTS_DIR/${RUN_ID}_fio.json"
---- /dev/null	2026-04-06 13:48:39.614838588 +0000
-+++ zfs-2.4.1-qos/tests/qos-stress/teardown.sh	2026-04-29 06:52:21.264929166 +0000
-@@ -0,0 +1,71 @@
+--- zfs-2.4.1/tests/qos-stress/teardown.sh	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/tests/qos-stress/teardown.sh	2026-06-12 13:53:11.356428286 +0000
+@@ -0,0 +1,77 @@
 +#!/bin/bash
 +# ── Y-patch17 stress harness: destroy all stress datasets under POOL ──
 +#
@@ -3849,17 +4145,23 @@
 +NT=${#TARGETS[@]}
 +log "destroying $NT datasets under $PARENT"
 +
-+# ── Batch destroy via xargs ──
++# ── Per-dataset destroy via xargs ──
 +# `zfs destroy -f` is used — it only fails on busy datasets (e.g. fio
 +# still running).  Callers should run_load.sh to completion before
 +# teardown.
++#
++# AW-patch49: one dataset per invocation (-n 1).  `zfs destroy` accepts
++# a single dataset argument; the previous `-n 50` batching produced
++# `zfs destroy ds0 ds1 ...` which fails with "too many arguments" and
++# tore down nothing.  -n 1 keeps the dsNNNN-only safety filter (unlike
++# `zfs destroy -r` on the parent, which would also remove non-ds nodes).
 +#
 +# Y-patch17 c2: we run xargs sequentially (-P 1).  Parallel destroys
 +# (-P 4) were untested and can race on shared metaslab/synctask state
 +# under stress; sequential stays well within the <2 min target for
 +# 2000 datasets on NVMe.
 +if [ "$NT" -gt 0 ]; then
-+    printf '%s\n' "${TARGETS[@]}" | xargs -n 50 -P 1 zfs destroy -f
++    printf '%s\n' "${TARGETS[@]}" | xargs -n 1 -P 1 zfs destroy -f
 +fi
 +
 +if [ "$PURGE_PARENT" -eq 1 ]; then
@@ -3871,3 +4173,451 @@
 +ELAPSED=$((END - START))
 +log "done: destroyed=$NT purge_parent=$PURGE_PARENT elapsed=${ELAPSED}s"
 +echo "destroyed=$NT purge_parent=$PURGE_PARENT elapsed=${ELAPSED}s"
+--- zfs-2.4.1/tests/qos-validation/README.md	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/tests/qos-validation/README.md	2026-07-05 22:04:48.698701135 +0000
+@@ -0,0 +1,76 @@
++# qos-validation — Validation utilisateur du throttle QoS
++
++Suite auto-contenue pour vérifier que le patch QoS fonctionne sur **votre**
++machine (Linux ou FreeBSD), après build et chargement du module patché.
++
++## Prérequis
++
++- Module ZFS avec le patch QoS chargé (voir README racine pour le build)
++- `fio` (`apt install fio` / `pkg install fio`)
++- Un pool avec ~2 GiB libres
++- root (les datasets de test sont créés puis **détruits** par le script)
++
++## Lancer
++
++```bash
++sudo bash run_validation.sh <pool> [runtime_s]
++# exemple :
++sudo bash run_validation.sh tank 60
++```
++
++Le script :
++
++1. crée `pool/qosval1..4` avec caps read+write **5/10/20/40 MiB/s**
++   (valeurs en bytes bruts : `zfs set qos:max_bw_write=5242880` — les
++   suffixes `M`/`G` sont ignorés par le parseur kernel) ;
++2. exécute `bench_matrix.sh` sur chaque dataset : 5 patterns fio
++   (`seq_write`, `seq_read`, `rand_write 4K`, `rand_read 4K`,
++   `readwrite 50/50`), `--direct=1 --time_based`, seed incompressible ;
++3. vérifie pour chaque pattern `throughput <= 1.10 x cap` et
++   `>= 0.30 x cap` (un dataset non throttlé mesurerait 10-100x le cap) ;
++4. vérifie que les kstats `stat_throttle_ns_read/write` progressent
++   (le temps d'attente est réellement comptabilisé, par direction) ;
++5. vérifie qu'aucun cap n'a dérivé pendant les runs ;
++6. détruit les datasets de test.
++
++Exit 0 = tout PASS. Exit 1 = au moins un FAIL (le résumé indique lesquels).
++
++## Interprétation
++
++| Observation | Verdict |
++|---|---|
++| ratio 1.00–1.03 à runtime 60 s | nominal (burst 2x du token bucket amorti) |
++| ratio jusqu'à 1.33 à runtime 6 s | **pas un bug** — burst by design, allongez le runtime |
++| `rand_write` sous le cap (caps >= 20 MiB/s) | plancher latence ZIL 4K sync, pas un défaut QoS |
++| ratio >> 1.10 | throttle inopérant — vérifier module chargé (voir ci-dessous) |
++| `throttle_ns_* = 0` avec du trafic throttlé | accounting mort — module antérieur au fix AY51 |
++
++## Pièges connus
++
++- **Module chargé ≠ module installé.** Linux : comparer
++  `cat /sys/module/zfs/srcversion` avec `modinfo <votre .ko> | grep srcversion`.
++  FreeBSD : `kern.module_path` lit `/boot/kernel` **avant** `/boot/modules` —
++  un `openzfs.ko` résiduel dans `/boot/kernel` masque silencieusement le vôtre.
++- **Caps en bytes bruts** : `qos:max_bw_read=100M` → le kernel voit 100 B/s.
++- **`count_arc_hits=off` désactive tout le gate read** (les deux gates lecture
++  exigent la comptabilisation ARC). Le script force `on`.
++- Reads mesurés via ARC : avec `count_arc_hits=on` (défaut), les hits ARC
++  traversent le throttle — c'est le comportement attendu.
++
++## kstats
++
++- Linux : `/proc/spl/kstat/zfs/<pool>/qos-0x<objsetid_hex>`
++- FreeBSD : `sysctl kstat.zfs.<pool>.qos.qos-0x<objsetid_hex>`
++
++`objsetid` : `zfs get objsetid <dataset>` (convertir en hexa).
++
++Compteurs notables : `stat_total_ios/bytes` (par direction),
++`stat_throttle_count_*` (I/O ayant attendu), `stat_throttle_ns_*`
++(temps cumulé d'attente, ns).
++
++## Aller plus loin
++
++- `tests/qos-stress/` — contention de locks et CPU du wake-thread sous
++  charge multi-datasets.
++- `bench_matrix.sh` est utilisable seul sur un dataset existant :
++  `DS=tank/data RUNTIME=60 bash bench_matrix.sh`
+--- zfs-2.4.1/tests/qos-validation/bench_matrix.sh	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/tests/qos-validation/bench_matrix.sh	2026-07-05 22:03:39.572774561 +0000
+@@ -0,0 +1,193 @@
++#!/bin/bash
++# bench_matrix.sh — QoS throttle validation on a single ZFS dataset
++#
++# Runs 4 patterns (seq_read, seq_write, rand_read, rand_write) against a seed
++# file on the given dataset, printing bandwidth in MB/s.
++#
++# Lessons learned (2026-04-22):
++#   1. QoS user-props (qos:max_bw_*) CAN silently reset to 0 on LNX — always
++#      read them back BEFORE and AFTER each run. Fail loud if drift.
++#   2. sync=disabled does NOT bypass the QoS read-path throttle; rand_write
++#      is floored by ZIL/txg latency when sync=standard AND cap is small
++#      (cap ~5 MB/s + 4K sync → throttle never saturates).
++#      Mitigation: put the ZIL on RAM (SLOG). See ram_slog_apply.sh.
++#   3. Unit parsing: fio emits bw in KiB/s|MiB/s|GiB/s (and rarely B/s).
++#      Convert uniformly to MB/s (decimal) for human comparison.
++#   4. Seed MUST be INCOMPRESSIBLE — NEVER /dev/zero. With compression=on,
++#      a zero seed is stored as holes and reads short-circuit to memory
++#      speed (hole-read, bypasses qos_bucket_wait_consume). Always seed
++#      with /dev/urandom. A fresh zero seed will report 27 GiB/s reads
++#      regardless of cap, masking throttle correctness.
++#   5. Order: run writes first to refresh the seed, then reads hit ARC.
++#      When count_arc_hits=on, ARC reads still traverse the throttle.
++#   6. RAM SLOG (ram0 on LNX / md0 on BSD) dramatically accelerates SYNC
++#      writes (BSD bench0 rand_write 12→1500 MB/s observed). But LNX
++#      fio --direct=1 bypasses the ZIL entirely → SLOG has no effect on
++#      direct=1 rand_write on Linux. Applies only to indirect (cached)
++#      sync writes on Linux, both direct and indirect on FreeBSD.
++#   7. Transient SLOG-remove degradation: pool observes ~200 KiB/s sync
++#      writes for ~30s after `zpool remove <log>` while txg drains. Let
++#      the pool settle between teardown and the next bench iteration,
++#      or only remove SLOG during shutdown.
++#
++# Usage:
++#   DS=testqos/bench1 [RUNTIME=10] [SIZE=192M] [CAP_RESTORE=1] \
++#     [EXPECTED_CAP_R=5242880] [EXPECTED_CAP_W=5242880] \
++#     bash bench_matrix.sh
++#
++# Env variables:
++#   DS              Dataset (default: testqos/bench1)
++#   RUNTIME         fio runtime seconds (default: 10)
++#   SIZE            fio size (default: 192M)
++#   CAP_RESTORE     If 1, set qos:max_bw_{read,write} to EXPECTED_* before run
++#   EXPECTED_CAP_R  Expected qos:max_bw_read (bytes). Fail if drift post-run.
++#   EXPECTED_CAP_W  Expected qos:max_bw_write (bytes). Fail if drift post-run.
++#
++# Output: 4 lines, one per pattern, in MB/s. Exit 0 on success, 2 on drift.
++
++set -u
++
++DS="${DS:-testqos/bench1}"
++RUNTIME="${RUNTIME:-10}"
++SIZE="${SIZE:-192M}"
++CAP_RESTORE="${CAP_RESTORE:-0}"
++EXPECTED_CAP_R="${EXPECTED_CAP_R:-}"
++EXPECTED_CAP_W="${EXPECTED_CAP_W:-}"
++
++MOUNT=$(zfs get -H -o value mountpoint "$DS" 2>/dev/null)
++if [ -z "$MOUNT" ] || [ "$MOUNT" = "-" ] || [ "$MOUNT" = "none" ]; then
++  echo "ERROR: cannot resolve mountpoint for $DS" >&2
++  exit 1
++fi
++FILE="$MOUNT/seed"
++
++# ─── Preflight: QoS state ─────────────────────────────────────────────
++read_prop() {
++  zfs get -H -o value "$1" "$DS" 2>/dev/null
++}
++fmt_bytes() {
++  awk -v b="$1" 'BEGIN{
++    if (b+0==0)      { print "0" }
++    else if (b>=1048576){ printf "%.1f MiB/s", b/1048576 }
++    else             { printf "%s B/s", b }
++  }'
++}
++
++ENABLED=$(read_prop qos:enabled)
++CAP_R=$(read_prop qos:max_bw_read)
++CAP_W=$(read_prop qos:max_bw_write)
++BOOST=$(read_prop qos:boost)
++ARC_HITS=$(read_prop qos:count_arc_hits)
++SYNC=$(read_prop sync)
++
++# Optional: restore caps before test (defends against silent drift)
++if [ "$CAP_RESTORE" = "1" ]; then
++  if [ -n "$EXPECTED_CAP_R" ] && [ "$CAP_R" != "$EXPECTED_CAP_R" ]; then
++    echo "  [restore] qos:max_bw_read $CAP_R -> $EXPECTED_CAP_R"
++    sudo zfs set "qos:max_bw_read=$EXPECTED_CAP_R" "$DS"
++    CAP_R="$EXPECTED_CAP_R"
++  fi
++  if [ -n "$EXPECTED_CAP_W" ] && [ "$CAP_W" != "$EXPECTED_CAP_W" ]; then
++    echo "  [restore] qos:max_bw_write $CAP_W -> $EXPECTED_CAP_W"
++    sudo zfs set "qos:max_bw_write=$EXPECTED_CAP_W" "$DS"
++    CAP_W="$EXPECTED_CAP_W"
++  fi
++fi
++
++# Warn if enabled=on but caps=0 (likely silent reset bug)
++if [ "$ENABLED" = "on" ] && [ "${CAP_R:-0}" = "0" ] && [ "${CAP_W:-0}" = "0" ]; then
++  echo "  [WARN] $DS: qos:enabled=on but both caps=0 (no throttle will apply)" >&2
++fi
++
++echo "  === $DS ==="
++printf "  %-18s %s\n" "qos:enabled"        "$ENABLED"
++printf "  %-18s %s (%s)\n" "qos:max_bw_read"   "$CAP_R" "$(fmt_bytes "${CAP_R:-0}")"
++printf "  %-18s %s (%s)\n" "qos:max_bw_write"  "$CAP_W" "$(fmt_bytes "${CAP_W:-0}")"
++printf "  %-18s %s\n" "qos:boost"          "$BOOST"
++printf "  %-18s %s\n" "qos:count_arc_hits" "$ARC_HITS"
++printf "  %-18s %s\n" "sync"               "$SYNC"
++
++# ─── Seed ─────────────────────────────────────────────────────────────
++# Incompressible seed — /dev/urandom, NOT /dev/zero. With compression=on, a
++# zero seed is stored as a hole and reads short-circuit to memory speed.
++if [ ! -f "$FILE" ] || [ "$(stat -c %s "$FILE" 2>/dev/null || stat -f %z "$FILE")" -lt 268435456 ]; then
++  echo "  [seed] building incompressible 256 MiB at $FILE"
++  sudo dd if=/dev/urandom of="$FILE" bs=1M count=256 conv=fsync status=none 2>/dev/null
++fi
++
++# ─── Bench patterns ───────────────────────────────────────────────────
++# Order: writes first (refresh seed) then reads (ARC warm).
++# AT-patch43 — pattern readwrite ajoute (50/50 R/W mixed seq 1M)
++MODES=(
++  "seq_write   write      1M"
++  "seq_read    read       1M"
++  "rand_write  randwrite  4K"
++  "rand_read   randread   4K"
++  "readwrite   readwrite  1M"
++)
++
++# Parse fio bw= line into MB/s (decimal).
++to_mb_per_s() {
++  local raw="$1"
++  local val unit
++  val=$(echo "$raw" | sed 's/[^0-9.]//g')
++  unit=$(echo "$raw" | sed 's/[0-9.]//g')
++  if [ -z "$val" ]; then echo "0"; return; fi
++  case "$unit" in
++    GiB/s)  awk "BEGIN{printf \"%.2f\", $val*1073.74}" ;;
++    MiB/s)  awk "BEGIN{printf \"%.2f\", $val*1.04858}" ;;
++    KiB/s)  awk "BEGIN{printf \"%.3f\", $val*0.001024}" ;;
++    B/s)    awk "BEGIN{printf \"%.6f\", $val/1000000}" ;;
++    *)      echo "$val" ;;
++  esac
++}
++
++for m in "${MODES[@]}"; do
++  label=$(echo "$m" | awk '{print $1}')
++  rw=$(echo "$m" | awk '{print $2}')
++  bs=$(echo "$m" | awk '{print $3}')
++  log="/tmp/fio_$(basename "$DS")_${label}.log"
++  # AT-patch43 — readwrite mix needs --rwmixread=50 for 50/50 R/W split.
++  extra=""
++  [ "$rw" = "readwrite" ] && extra="--rwmixread=50"
++  # `sudo fio … > $log` redirects BEFORE sudo drops privs — creates $log as
++  # invoking user. Chain everything through sudo sh -c to keep the redirect
++  # inside the privileged shell (fio needs root to write to zvols/raw files).
++  sudo sh -c "fio --name='${label}' --filename='$FILE' --rw='$rw' --bs='$bs' $extra \
++    --direct=1 --ioengine=psync --iodepth=1 \
++    --size='$SIZE' --runtime='$RUNTIME' --time_based=1 \
++    --norandommap --group_reporting > '$log' 2>&1"
++  # AT-patch44 — for readwrite, emit 2 separate lines (R/W) to allow per-direction
++  # ratio_vs_cap (cap is per-direction in QoS, AT-patch43 sum was a method artifact).
++  if [ "$rw" = "readwrite" ]; then
++    raw_r=$(awk '/  read:/ {for(i=1;i<=NF;i++) if($i~/^BW=/){gsub("BW=|,|\\(.*\\)","",$i); print $i; exit}}' "$log")
++    raw_w=$(awk '/  write:/ {for(i=1;i<=NF;i++) if($i~/^BW=/){gsub("BW=|,|\\(.*\\)","",$i); print $i; exit}}' "$log")
++    mb_r=$(to_mb_per_s "$raw_r")
++    mb_w=$(to_mb_per_s "$raw_w")
++    printf "  %-11s : %9s MB/s  (raw: %s)\n" "readwrite_R" "$mb_r" "${raw_r:-ERR}"
++    printf "  %-11s : %9s MB/s  (raw: %s)\n" "readwrite_W" "$mb_w" "${raw_w:-ERR}"
++  else
++    raw=$(awk '/READ:|WRITE:/ {for(i=1;i<=NF;i++) if($i~/^bw=/){gsub("bw=|,","",$i); print $i; exit}}' "$log")
++    mb=$(to_mb_per_s "$raw")
++    printf "  %-11s : %9s MB/s  (raw: %s)\n" "$label" "$mb" "${raw:-ERR}"
++  fi
++done
++
++# ─── Postflight: drift check ──────────────────────────────────────────
++POST_CAP_R=$(read_prop qos:max_bw_read)
++POST_CAP_W=$(read_prop qos:max_bw_write)
++drift=0
++if [ "$POST_CAP_R" != "$CAP_R" ]; then
++  echo "  [DRIFT] qos:max_bw_read $CAP_R -> $POST_CAP_R" >&2
++  drift=1
++fi
++if [ "$POST_CAP_W" != "$CAP_W" ]; then
++  echo "  [DRIFT] qos:max_bw_write $CAP_W -> $POST_CAP_W" >&2
++  drift=1
++fi
++if [ "$drift" = "1" ]; then
++  echo "  [FAIL] QoS caps drifted during test — investigate persistence bug" >&2
++  exit 2
++fi
++
++exit 0
+--- zfs-2.4.1/tests/qos-validation/run_validation.sh	1970-01-01 00:00:00.000000000 +0000
++++ zfs-2.4.1-qos/tests/qos-validation/run_validation.sh	2026-07-05 22:04:21.309733705 +0000
+@@ -0,0 +1,170 @@
++#!/bin/bash
++# run_validation.sh — Validation utilisateur du throttle QoS (Linux + FreeBSD)
++#
++# Crée 4 datasets temporaires avec caps 5/10/20/40 MiB/s, exécute la matrice
++# fio (bench_matrix.sh, 5 patterns, time_based) sur chacun, vérifie :
++#   1. throughput des patterns bornés <= TOL x cap (défaut 1.10 — le token
++#      bucket a un burst 2x rate, à RUNTIME=60s l'overshoot attendu est 1.03x)
++#   2. le throttle agit réellement (throughput >= 0.30 x cap : un dataset non
++#      throttlé mesurerait 10-100x le cap)
++#   3. les kstats stat_throttle_ns_{read,write} progressent (temps d'attente
++#      réellement comptabilisé, directions séparées)
++#   4. aucun drift des caps pendant les runs (exit 2 de bench_matrix.sh)
++#
++# Usage:
++#   sudo bash run_validation.sh <pool> [runtime_s]
++#   sudo bash run_validation.sh tank 60
++#
++# Prérequis : module ZFS avec patch QoS chargé, fio, ~2 GiB libres sur le pool.
++# RUNTIME 60-90s recommandé : en dessous de 30s le burst du token bucket
++# fausse la mesure (6s -> 1.33x cap, by design).
++#
++# NOTE rand_write : fio 4K sync direct est plafonné par la latence ZIL bien
++# en dessous des caps élevés (~15-30 MB/s selon le disque). C'est un plancher
++# I/O, pas un défaut QoS — le critère "min" n'est donc pas appliqué à
++# rand_write pour les caps >= 20 MiB/s.
++
++set -u
++
++POOL="${1:-}"
++RUNTIME="${2:-60}"
++TOL_HI="${TOL_HI:-1.10}"
++TOL_LO="${TOL_LO:-0.30}"
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++if [ -z "$POOL" ]; then
++    echo "Usage: sudo bash $0 <pool> [runtime_s]" >&2
++    exit 1
++fi
++if ! zpool list "$POOL" >/dev/null 2>&1; then
++    echo "ERROR: pool '$POOL' introuvable" >&2
++    exit 1
++fi
++if ! command -v fio >/dev/null 2>&1; then
++    echo "ERROR: fio requis (apt install fio / pkg install fio)" >&2
++    exit 1
++fi
++if [ "$RUNTIME" -lt 30 ]; then
++    echo "WARN: RUNTIME=$RUNTIME < 30s — l'overshoot burst faussera les ratios (voir en-tête)" >&2
++fi
++
++OS=$(uname -s)
++MIB=1048576
++CAPS_MIB=(5 10 20 40)
++
++# ─── kstat helpers (Linux: procfs / FreeBSD: sysctl) ─────────────────
++kstat_ns() {
++    # $1=dataset $2=read|write -> valeur stat_throttle_ns_<dir> (0 si absent)
++    local osid hex v
++    osid=$(zfs get -H -o value objsetid "$1" 2>/dev/null) || { echo 0; return; }
++    hex=$(printf '0x%x' "$osid")
++    case "$OS" in
++        Linux)
++            v=$(awk -v k="stat_throttle_ns_$2" '$1==k{print $3}' \
++                "/proc/spl/kstat/zfs/$POOL/qos-$hex" 2>/dev/null) ;;
++        FreeBSD)
++            v=$(sysctl -n "kstat.zfs.$POOL.qos.qos-$hex.stat_throttle_ns_$2" 2>/dev/null) ;;
++        *) v=0 ;;
++    esac
++    echo "${v:-0}"
++}
++
++# ─── Setup datasets ───────────────────────────────────────────────────
++CREATED=()
++cleanup() {
++    for ds in "${CREATED[@]:-}"; do
++        [ -n "$ds" ] && zfs destroy -r "$ds" 2>/dev/null
++    done
++}
++trap cleanup EXIT
++
++echo "══════════════════════════════════════════════════════════════"
++echo "  QoS validation — pool=$POOL runtime=${RUNTIME}s tol=${TOL_HI}x  ($OS)"
++echo "══════════════════════════════════════════════════════════════"
++
++for idx in 0 1 2 3; do
++    cap_mib=${CAPS_MIB[$idx]}
++    ds="$POOL/qosval$((idx+1))"
++    cap_bytes=$((cap_mib * MIB))
++    zfs destroy -r "$ds" 2>/dev/null
++    zfs create -o atime=off "$ds" || { echo "ERROR: zfs create $ds"; exit 1; }
++    CREATED+=("$ds")
++    zfs set "qos:max_bw_read=$cap_bytes" "qos:max_bw_write=$cap_bytes" \
++            qos:boost=0 qos:count_arc_hits=on qos:enabled=on "$ds"
++done
++
++# Sanity : le support QoS est-il présent ? (propriété relue + kstat visible)
++if [ "$(zfs get -H -o value qos:enabled "$POOL/qosval1")" != "on" ]; then
++    echo "ERROR: qos:enabled ne se fixe pas — module QoS absent ?" >&2
++    exit 1
++fi
++if [ "$(kstat_ns "$POOL/qosval1" write)" = "" ]; then
++    echo "ERROR: kstats qos-* introuvables — module QoS absent ?" >&2
++    exit 1
++fi
++
++# ─── Run matrix per dataset ───────────────────────────────────────────
++FAILS=0
++CHECKS=0
++SUMMARY=""
++
++for idx in 0 1 2 3; do
++    cap_mib=${CAPS_MIB[$idx]}
++    ds="$POOL/qosval$((idx+1))"
++    cap_bytes=$((cap_mib * MIB))
++    cap_mbs=$(awk "BEGIN{printf \"%.2f\", $cap_bytes/1000000}")
++
++    ns_r0=$(kstat_ns "$ds" read); ns_w0=$(kstat_ns "$ds" write)
++
++    out=$(DS="$ds" RUNTIME="$RUNTIME" SIZE=192M CAP_RESTORE=0 \
++          EXPECTED_CAP_R="$cap_bytes" EXPECTED_CAP_W="$cap_bytes" \
++          bash "$SCRIPT_DIR/bench_matrix.sh")
++    rc=$?
++    echo "$out"
++    if [ $rc -eq 2 ]; then
++        echo "  [FAIL] drift des caps détecté sur $ds" >&2
++        FAILS=$((FAILS+1))
++    fi
++
++    ns_r1=$(kstat_ns "$ds" read); ns_w1=$(kstat_ns "$ds" write)
++
++    # Ratios par pattern
++    while read -r label mb; do
++        [ -z "$label" ] && continue
++        CHECKS=$((CHECKS+1))
++        ratio=$(awk "BEGIN{printf \"%.3f\", $mb/$cap_mbs}")
++        verdict="PASS"
++        hi_bad=$(awk "BEGIN{print ($ratio > $TOL_HI) ? 1 : 0}")
++        lo_bad=$(awk "BEGIN{print ($ratio < $TOL_LO) ? 1 : 0}")
++        # rand_write : plancher ZIL, pas de critère bas au-delà de 10 MiB/s
++        if [ "$label" = "rand_write" ] && [ "$cap_mib" -ge 20 ]; then lo_bad=0; fi
++        if [ "$hi_bad" = "1" ] || [ "$lo_bad" = "1" ]; then
++            verdict="FAIL"; FAILS=$((FAILS+1))
++        fi
++        SUMMARY+=$(printf "  %-8s cap=%2d MiB/s  %-12s %8s MB/s  ratio=%s  %s" \
++                   "qosval$((idx+1))" "$cap_mib" "$label" "$mb" "$ratio" "$verdict")$'\n'
++    done < <(echo "$out" | awk '/MB\/s/{gsub(":","",$0); print $1, $2}')
++
++    # throttle_ns : les deux directions doivent avoir progressé
++    CHECKS=$((CHECKS+2))
++    d_r=$((ns_r1 - ns_r0)); d_w=$((ns_w1 - ns_w0))
++    v_r=PASS; v_w=PASS
++    [ "$d_r" -le 0 ] && { v_r=FAIL; FAILS=$((FAILS+1)); }
++    [ "$d_w" -le 0 ] && { v_w=FAIL; FAILS=$((FAILS+1)); }
++    SUMMARY+=$(printf "  %-8s throttle_ns_read  +%s ns  %s" "qosval$((idx+1))" "$d_r" "$v_r")$'\n'
++    SUMMARY+=$(printf "  %-8s throttle_ns_write +%s ns  %s" "qosval$((idx+1))" "$d_w" "$v_w")$'\n'
++done
++
++echo ""
++echo "══════════════════════════════════════════════════════════════"
++echo "  RÉSUMÉ ($CHECKS checks)"
++echo "══════════════════════════════════════════════════════════════"
++printf "%s" "$SUMMARY"
++echo ""
++if [ "$FAILS" -eq 0 ]; then
++    echo "  RÉSULTAT : PASS ($CHECKS/$CHECKS)"
++    exit 0
++else
++    echo "  RÉSULTAT : $FAILS FAIL / $CHECKS checks"
++    exit 1
++fi

@@ -315,12 +315,18 @@
 #include <sys/zstd/zstd.h>
 
 /*
- * QoS: tag for per-dataset ARC accounting long holds.  arc_read()
- * and arc_evict_hdr() are separate functions so FTAG (= __func__)
- * would produce different strings, causing a refcount ASSERT failure
- * in debug builds.  Use a shared static string instead.
+ * QoS AZ-patch52: the per-dataset ARC accounting (hdr->b_dataset +
+ * ds_arc_bytes, tagged with "arc_qos_ds_hold" long holds) has been
+ * REMOVED.  A dsl_dataset_long_hold() does not pin the dsl_dataset_t
+ * memory (only the bonus-dbuf hold does), so tagged headers kept raw
+ * pointers to datasets that dsl_dataset_evict_async() could kmem_free
+ * at any time; every later ARC access then executed
+ * atomic_add_64(&freed_ds->ds_arc_bytes, lsize) — reproducible SLUB
+ * corruption under the S3/CIFS suites (poison overwritten at the
+ * ds_arc_bytes offset, +4096/+131072 single-field increments).
+ * ds_arc_bytes had no consumer anywhere in the tree, so the whole
+ * mechanism is deleted rather than re-plumbed with real holds.
  */
-static const char arc_qos_tag[] = "arc_qos_ds_hold";
 
 #ifndef _KERNEL
 /* set with ZFS_DEBUG=watch, to enable watchpoints on frozen buffers */
@@ -3326,7 +3332,6 @@ arc_hdr_alloc(uint64_t spa, int32_t psize, int32_t lsize,
 	hdr->b_l1hdr.b_mfu_hits = 0;
 	hdr->b_l1hdr.b_mfu_ghost_hits = 0;
 	hdr->b_l1hdr.b_buf = NULL;
-	hdr->b_dataset = NULL;
 
 	ASSERT(zfs_refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
 
@@ -3789,18 +3794,7 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, uint64_t *real_evicted)
 	ASSERT0P(hdr->b_l1hdr.b_buf);
 	ASSERT0(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt));
 
-	/* QoS: decrement per-dataset ARC accounting */
-	if (hdr->b_dataset != NULL) {
-		uint64_t lsize = HDR_GET_LSIZE(hdr);
-		uint64_t old, new_val;
-		do {
-			old = hdr->b_dataset->ds_arc_bytes;
-			new_val = (old >= lsize) ? old - lsize : 0;
-		} while (atomic_cas_64(&hdr->b_dataset->ds_arc_bytes,
-		    old, new_val) != old);
-		dsl_dataset_long_rele(hdr->b_dataset, arc_qos_tag);
-		hdr->b_dataset = NULL;
-	}
+	/* QoS AZ-patch52: per-dataset ARC accounting removed (see top). */
 
 	*real_evicted = 0;
 	state = hdr->b_l1hdr.b_state;
@@ -5416,10 +5410,7 @@ arc_access(arc_buf_hdr_t *hdr, arc_flags_t arc_flags, boolean_t hit)
 			DTRACE_PROBE1(new_state__mru, arc_buf_hdr_t *, hdr);
 		}
 		arc_change_state(new_state, hdr);
-		/* QoS: track ARC bytes per dataset on first insertion */
-		if (hdr->b_dataset != NULL)
-			atomic_add_64(&hdr->b_dataset->ds_arc_bytes,
-			    HDR_GET_LSIZE(hdr));
+		/* QoS AZ-patch52: per-dataset ARC accounting removed. */
 	} else if (hdr->b_l1hdr.b_state == arc_mru) {
 		/*
 		 * This buffer has been accessed once recently and either
@@ -6146,30 +6137,21 @@ top:
 			    BP_IS_PROTECTED(bp), BP_GET_COMPRESS(bp), 0, type);
 
 			/*
-			 * QoS: resolve dataset for per-dataset ARC
-			 * accounting.  Skip in sync context to avoid
-			 * deadlock on dp_config_rwlock (held for
-			 * write by the sync thread).
+			 * QoS AZ-patch52: the per-dataset ARC tagging that
+			 * lived here (dsl_dataset_hold_obj on every ARC
+			 * miss, long_hold + hdr->b_dataset raw pointer) has
+			 * been removed.  Beyond the use-after-free described
+			 * at the top of this file, the hook itself was the
+			 * churn generator: it LOADED not-in-memory datasets
+			 * from the ZIO read-interrupt path (z_rd_int →
+			 * arc_read → dsl_dataset_hold_obj → dsl_dir_hold_obj
+			 * → zap_value_search), and the transient
+			 * dsl_dataset_t incarnations it created were evicted
+			 * seconds later with the ARC tags still pointing at
+			 * them (AZ52 canary: dozens of "UAF-WINDOW ...
+			 * longholds>0 arc_bytes>0" evictions per second
+			 * under CIFS load).
 			 */
-			if (zb != NULL && zb->zb_objset != 0) {
-				dsl_pool_t *dp = spa_get_dsl(spa);
-				if (dp != NULL &&
-				    !dsl_pool_sync_context(dp)) {
-					dsl_dataset_t *ds;
-					dsl_pool_config_enter(dp, FTAG);
-					if (dsl_dataset_hold_obj(dp,
-					    zb->zb_objset, FTAG,
-					    &ds) == 0) {
-						if (!ds->ds_is_snapshot) {
-							dsl_dataset_long_hold(
-							    ds, arc_qos_tag);
-							hdr->b_dataset = ds;
-						}
-						dsl_dataset_rele(ds, FTAG);
-					}
-					dsl_pool_config_exit(dp, FTAG);
-				}
-			}
 
 			if (!embedded_bp) {
 				hdr->b_dva = *BP_IDENTITY(bp);

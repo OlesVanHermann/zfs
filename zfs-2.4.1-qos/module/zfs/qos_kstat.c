@@ -160,7 +160,13 @@ qos_kstat_update(kstat_t *ksp, int rw)
 	int64_t boost_iops_w = bucket->qb_write.tb_boost_iops_tokens;
 	mutex_exit(&bucket->qb_lock);
 
-	/* Cumulative stats (atomic — lockless read OK). */
+	/*
+	 * Cumulative stats — written under qb_lock as plain increments
+	 * (AW-patch49).  Lockless read here is safe: 64-bit aligned loads
+	 * are naturally atomic on x86_64 and arm64, only one writer runs at
+	 * a time (qb_lock), and the counters are monotonic, so a transiently
+	 * stale read is acceptable for statistics.
+	 */
 	uint64_t total_ios_r = bucket->qb_read.tb_stat_total_ios;
 	uint64_t total_bytes_r = bucket->qb_read.tb_stat_total_bytes;
 	uint64_t total_ios_w = bucket->qb_write.tb_stat_total_ios;

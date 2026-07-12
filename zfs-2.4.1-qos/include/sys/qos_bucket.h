@@ -125,6 +125,13 @@ qos_result_t qos_bucket_try_consume(qos_bucket_t *bucket,
 void qos_bucket_refund(qos_bucket_t *bucket, uint64_t bytes);
 void qos_bucket_wait_consume(qos_bucket_t *bucket,
     qos_io_type_t type, uint64_t io_size);
+/*
+ * AY-patch51: credit throttle wait time measured OUTSIDE qos_bucket.c
+ * (e.g. the dmu_tx_wait() ERESTART/delay(1) loop, sole wait point of the
+ * DMU-level write gate) to the per-direction throttle_ns statistic.
+ */
+void qos_bucket_account_throttle_ns(qos_bucket_t *bucket,
+    qos_io_type_t type, hrtime_t wait_ns);
 void qos_bucket_get_stats(qos_bucket_t *bucket, uint64_t *total_ios,
     uint64_t *total_bytes, uint64_t *throttle_count,
     uint64_t *throttle_ns, uint64_t *rejected_size);
@@ -146,6 +153,14 @@ extern uint64_t qos_zil_waited_total;
  * hook is skipped.  Published in the qos-boost-wake kstat.
  */
 extern uint64_t qos_kstat_tx_objset_null_writes;
+
+/*
+ * AV-patch48: gate for the Z-patch18 diagnostic atomics.  Default 0 so the
+ * patched module has zero measurable overhead vs vanilla when no dataset has
+ * qos:enabled=on.  Set to 1 (module param zfs_qos_debug) to re-enable the
+ * fast-path-hit and objset-null-write probes.  Defined in qos_bucket.c.
+ */
+extern int zfs_qos_debug;
 
 #ifdef	__cplusplus
 }

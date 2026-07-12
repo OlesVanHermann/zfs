@@ -119,6 +119,13 @@ typedef struct dsl_pool {
 	uint64_t dp_dirty_total;
 	/* QoS: sum of qb_bw_rate for all QoS-enabled datasets */
 	uint64_t dp_qos_total_bw;
+	/*
+	 * AV-patch48: count of QoS-enabled buckets in this pool.  Read
+	 * (relaxed, no barrier) on the ARC miss hot path to skip dataset
+	 * resolution entirely when no dataset has qos:enabled=on.
+	 * Maintained by qos_bucket_enable/disable/fini via atomic_add_64.
+	 */
+	uint64_t dp_qos_enabled_count;
 	/* QoS Boost: per-pool active bucket list (patch08) */
 	list_t		dp_qos_active_buckets;
 	kmutex_t	dp_qos_active_lock;

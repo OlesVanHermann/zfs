@@ -47,17 +47,23 @@ mapfile -t TARGETS < <(zfs list -H -o name -r "$PARENT" \
 NT=${#TARGETS[@]}
 log "destroying $NT datasets under $PARENT"
 
-# ── Batch destroy via xargs ──
+# ── Per-dataset destroy via xargs ──
 # `zfs destroy -f` is used — it only fails on busy datasets (e.g. fio
 # still running).  Callers should run_load.sh to completion before
 # teardown.
+#
+# AW-patch49: one dataset per invocation (-n 1).  `zfs destroy` accepts
+# a single dataset argument; the previous `-n 50` batching produced
+# `zfs destroy ds0 ds1 ...` which fails with "too many arguments" and
+# tore down nothing.  -n 1 keeps the dsNNNN-only safety filter (unlike
+# `zfs destroy -r` on the parent, which would also remove non-ds nodes).
 #
 # Y-patch17 c2: we run xargs sequentially (-P 1).  Parallel destroys
 # (-P 4) were untested and can race on shared metaslab/synctask state
 # under stress; sequential stays well within the <2 min target for
 # 2000 datasets on NVMe.
 if [ "$NT" -gt 0 ]; then
-    printf '%s\n' "${TARGETS[@]}" | xargs -n 50 -P 1 zfs destroy -f
+    printf '%s\n' "${TARGETS[@]}" | xargs -n 1 -P 1 zfs destroy -f
 fi
 
 if [ "$PURGE_PARENT" -eq 1 ]; then

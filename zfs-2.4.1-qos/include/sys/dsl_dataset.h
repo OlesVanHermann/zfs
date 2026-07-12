@@ -274,8 +274,11 @@ typedef struct dsl_dataset {
 	/* QoS: per-dataset dirty data quota (F-patch05) */
 	uint64_t ds_dirty_quota;	/* 0 = unlimited (no QoS BW) */
 	uint64_t ds_dirty_bytes;	/* current dirty bytes (atomic) */
-	/* QoS: bytes currently in L1ARC for this dataset (G-patch06) */
-	uint64_t ds_arc_bytes;		/* atomic; no lock needed */
+	/*
+	 * QoS AZ-patch52: ds_arc_bytes (G-patch06 L1ARC accounting) removed.
+	 * It was written through dangling arc_buf_hdr_t.b_dataset pointers
+	 * after this struct was freed (SLUB corruption) and had no readers.
+	 */
 
 	/* Protected by ds_lock; keep at end of struct for better locality */
 	char ds_snapname[ZFS_MAX_DATASET_NAME_LEN];

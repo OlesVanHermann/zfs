@@ -8,10 +8,42 @@ toute la portabilité est assurée par la couche SPL d'OpenZFS.
 
 ## Statut
 
-- **Version** : 2.1 (sur OpenZFS 2.4.1, release upstream 2026-02-25)
-- **Validation** : **150/150 PASS** (S1 Solo, 5 protocoles × 2 OS) — 2026-04-19
-- **Overhead qos=off** : 0 % (mesuré 2026-04-29 par swap module vanilla 2.4.1 vs 2.1 sur la même VM, NFS Δ ≤ ±10 % bruit RPC, LOCAL writes -2 % à -16 % bruit run-to-run)
+- **Version** : 2.2 (sur OpenZFS 2.4.1, release upstream 2026-02-25)
+- **Validation** : campagne 2026-07-05 — voir [RESULTS.md](RESULTS.md)
+  (builds bi-OS, matrice caps 4 datasets × 5 patterns × 2 OS à RUNTIME=60 s,
+  accounting `throttle_ns` par direction, chaîne S1+S2+S3 sur 10 combinaisons
+  protocoles×OS) ; historique v2.1 : 150/150 PASS S1 (2026-04-19)
+- **Overhead qos=off** : 0 % (mesuré 2026-04-29 par swap module vanilla 2.4.1 vs 2.1 sur la même VM, NFS Δ ≤ ±10 % bruit RPC, LOCAL writes -2 % à -16 % bruit run-to-run) ; v2.2 supprime en plus tout travail résiduel quand aucun dataset n'est `qos:enabled=on`
 - **Plateformes testées** : Linux (Ubuntu 24.04, kernel 6.8) + FreeBSD (15.0-RELEASE-p5)
+
+## Nouveautés v2.2 (vs v2.1)
+
+- **Fix corruption mémoire (use-after-free ARC)** (AZ-patch52) : le comptage
+  ARC per-dataset (`hdr->b_dataset`/`ds_arc_bytes`, hérité de v1.0, sans
+  aucun lecteur) taguait les headers ARC d'un pointeur non épinglé — sous
+  churn de propriétés `qos:*` + I/O, écriture dans un `dsl_dataset_t` libéré
+  → corruption SLUB, panics sous S3/boost. Mécanisme supprimé, caps boost
+  écrits sous `qb_lock`, sentinelles de lifetime permanentes (`zfs_dbgmsg`).
+  Validé : repro muette ×2 OS, chaîne complète 15 h sans crash
+- **Fix dérive `dp_qos_total_bw`** : `qos_prop_apply()` déplacé après la
+  résolution winner/loser de `dsl_dataset_hold_obj()` (plus de gonflement du
+  total pool par course de chargement)
+- **Wake-thread par pool** (X-patch16 + AV-patch48) : le thread de réveil des
+  waiters est shardé par pool et démarré/arrêté selon le nombre de datasets
+  `qos:enabled=on` (`dp_qos_enabled_count`) — zéro travail résiduel qos=off
+- **Perf hot-path qos=on** (AW-patch49) : compteurs sous le `qb_lock` existant
+  (plus d'atomics dédiés côté Linux), 1 seul `gethrtime()` par `try_consume`,
+  aucune lecture d'horloge par retry
+- **Fix accounting `throttle_ns`** (AY-patch51) : `stat_throttle_ns_read/write`
+  comptabilisent réellement le temps d'attente sur les 3 chemins (sync
+  `wait_consume`, grant du wake-thread — direction résolue par `io_type` au
+  lieu de read codé en dur —, gate write DMU via `dmu_tx_wait`) ; validé 60 s
+  bi-OS : 91-99.8 % du wall time comptabilisé, directions strictes
+- **Suite `tests/qos-validation/`** : validation utilisateur auto-contenue
+  (crée 4 datasets cappés, matrice fio, vérifie ratios + kstats, détruit) —
+  `sudo bash tests/qos-validation/run_validation.sh <pool> 60`
+- **DESIGN.md** : architecture, points d'accrochage kernel, décisions
+  justifiées, historique complet
 
 ## Nouveautés v2.1 (vs v1.0)
 
@@ -27,7 +59,7 @@ toute la portabilité est assurée par la couche SPL d'OpenZFS.
 ├── zfs-2.4.1/                # OpenZFS 2.4.1 upstream (source vanilla)
 ├── zfs-2.4.1-qos/            # 2.4.1 + QoS (notre version modifiée)
 ├── patch-2.4.1/
-│   ├── zfs-qos.patch         # Diff unifié (32 fichiers, +3372 lignes)
+│   ├── zfs-qos.patch         # Diff unifié (36 fichiers, +3675 lignes)
 │   ├── specs-patches.md      # Spécifications fonctionnelles
 │   ├── DEPENDENCIES.md       # Ordre de dépendance des patchs
 │   └── TEST-PLAN.md          # Plan de test QoS
@@ -45,8 +77,21 @@ toute la portabilité est assurée par la couche SPL d'OpenZFS.
 ├── output/                   # Résultats de tests
 │   └── s1_full_chain_20260419.log
 ├── README.md                 # Ce fichier
-└── USAGE.md                  # Guide d'utilisation des propriétés QoS
+├── RESULTS.md                # Résultats de la campagne de validation v2.2
+├── USAGE.md                  # Guide d'utilisation des propriétés QoS
+└── DESIGN.md                 # Architecture, décisions de design, historique
 ```
+
+## Documentation
+
+| Document | Contenu |
+|----------|---------|
+| [RESULTS.md](RESULTS.md) | Résultats complets de la campagne de validation v2.2 |
+| [USAGE.md](USAGE.md) | Guide d'utilisation des propriétés QoS (`qos:*`) |
+| [DESIGN.md](DESIGN.md) | Architecture, points d'accrochage kernel, décisions de design justifiées, historique de construction v1.0→v2.1, stratégie de validation |
+| [patch-2.4.1/specs-patches.md](patch-2.4.1/specs-patches.md) | Spécifications fonctionnelles des 7 patches |
+| [patch-2.4.1/DEPENDENCIES.md](patch-2.4.1/DEPENDENCIES.md) | Dépendances et ordre de build |
+| [patch-2.4.1/TEST-PLAN.md](patch-2.4.1/TEST-PLAN.md) | Plan de test canonique (S1/S2/S3) |
 
 ## Patch — résumé
 
@@ -63,7 +108,7 @@ toute la portabilité est assurée par la couche SPL d'OpenZFS.
 | man/man7/zfsprops.7 | +63 | Documentation man page |
 | module/zfs/dmu.c | +54 | Throttle DMU read |
 | module/zfs/arc.c | +53 | ARC partitioning per-dataset |
-| module/zfs/zio.c | +29 | QoS gate sur zio_ready |
+| module/zfs/zio.c | +29 | Propagation du tag QoS aux ZIOs enfants (gate `zio_ready` d'origine retirée — O-patch09, voir DESIGN.md §3) |
 | module/zfs/zil.c | +29 | Rate-limit ZIL commits (sync writes) |
 | include/sys/dsl_pool.h | +19 | Structures pool QoS |
 | include/sys/dsl_dataset.h | +15 | Structures dataset QoS |
@@ -136,7 +181,7 @@ bash scripts/chain_full.sh --reboot --s1s2s3
 
 ## Environnement de test
 
-| VM | IP | OS | ZFS kmod |
-|----|----|----|----------|
-| zfs-qos | 192.168.122.187 | Ubuntu 24.04, kernel 6.8.0-107 | 2.4.1-1 QoS |
-| zfs-bsd-qos | 192.168.122.137 | FreeBSD 15.0-RELEASE-p5 | 2.4.1-1 QoS |
+| VM | OS | ZFS kmod |
+|----|----|----------|
+| zfs-qos | Ubuntu 24.04, kernel 6.8 | 2.4.1-1 QoS |
+| zfs-bsd-qos | FreeBSD 15.0-RELEASE-p5 | 2.4.1-1 QoS |

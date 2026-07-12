@@ -300,6 +300,8 @@ SRCS+=	abd.c \
 	multilist.c \
 	objlist.c \
 	pathname.c \
+	qos_bucket.c \
+	qos_kstat.c \
 	range_tree.c \
 	refcount.c \
 	rrwlock.c \

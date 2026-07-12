@@ -1176,8 +1176,13 @@ dmu_tx_try_assign(dmu_tx_t *tx)
 		 * writes reach dmu_tx_try_assign() through a path that
 		 * leaves tx_objset unset.  Diagnostic only: no behaviour
 		 * change, no fallback throttle.
+		 *
+		 * AV-patch48: gated behind zfs_qos_debug (declared in
+		 * sys/qos_bucket.h, already included) so this global atomic is
+		 * never touched on the QoS-off write path.
 		 */
-		atomic_add_64(&qos_kstat_tx_objset_null_writes, 1);
+		if (zfs_qos_debug)
+			atomic_add_64(&qos_kstat_tx_objset_null_writes, 1);
 	}
 
 	/* needed allocation: worst-case estimate of write space */
@@ -1420,7 +1425,24 @@ dmu_tx_wait(dmu_tx_t *tx)
 		 */
 		tx->tx_qos_throttled = B_FALSE;
 		delay(1);
-		spa_tx_assign_add_nsecs(spa, gethrtime() - before);
+		hrtime_t qos_waited = gethrtime() - before;
+		/*
+		 * AY-patch51: this loop is the only wait point of the
+		 * DMU-level write gate — credit the blocked time to
+		 * stat_throttle_ns_write (direction is always WRITE here:
+		 * tx_qos_throttled is set exclusively by the QOS_IO_WRITE
+		 * try_consume in dmu_tx_try_assign).  Reuses the clock
+		 * reads already needed by spa_tx_assign_add_nsecs.
+		 */
+		if (tx->tx_objset != NULL) {
+			dsl_dataset_t *qds = dmu_objset_ds(tx->tx_objset);
+			if (qds != NULL && !qds->ds_is_snapshot &&
+			    qds->ds_qos.qb_enabled) {
+				qos_bucket_account_throttle_ns(&qds->ds_qos,
+				    QOS_IO_WRITE, qos_waited);
+			}
+		}
+		spa_tx_assign_add_nsecs(spa, qos_waited);
 		return;
 	}
 

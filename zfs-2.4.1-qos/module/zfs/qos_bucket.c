@@ -92,6 +92,17 @@ static uint64_t qos_kstat_fastpath_hit_write      = 0;
 uint64_t        qos_kstat_tx_objset_null_writes   = 0;
 static kstat_t *qos_wake_kstat = NULL;
 
+/*
+ * AV-patch48: master gate for the Z-patch18 diagnostic atomics.  These
+ * counters (fastpath_hit_write, tx_objset_null_writes) live on hot paths
+ * that execute even when QoS is disabled, so an unconditional atomic_add_64
+ * causes cache-line bouncing across CPUs for zero functional benefit.
+ * Default 0 => the probes compile in but are never touched on the
+ * QoS-off fast path, giving parity with vanilla 2.4.1.  Operators can set
+ * zfs_qos_debug=1 to restore the Phase E observability.
+ */
+int zfs_qos_debug = 0;
+
 typedef struct qos_wake_kstat {
 	kstat_named_t qwk_surplus_collected;
 	kstat_named_t qwk_surplus_distributed;
@@ -145,12 +156,15 @@ qos_boost_weight(uint32_t factor, int64_t scale, int64_t rate)
  * Refill tokens for one dimension.
  * Returns surplus tokens that exceeded burst (available for boost).
  * Called under qb_lock.
+ *
+ * AW-patch49: the wall-clock sample `now` is supplied by the caller so a
+ * single gethrtime() can be shared across the two (try_consume) or four
+ * (wake thread) refills of one bucket pass, instead of one read each.
  */
 static inline int64_t
 qos_refill_with_surplus(int64_t *tokens, int64_t rate,
-    int64_t burst, hrtime_t *last_fill)
+    int64_t burst, hrtime_t *last_fill, hrtime_t now)
 {
-	hrtime_t now = gethrtime();
 	hrtime_t elapsed = now - *last_fill;
 	int64_t surplus = 0;
 
@@ -212,13 +226,27 @@ qos_bucket_fini(qos_bucket_t *bucket)
 {
 	list_t drain;
 	qos_waiter_t *w;
+	boolean_t was_enabled;
 
 	list_create(&drain, sizeof (qos_waiter_t),
 	    offsetof(qos_waiter_t, qw_node));
 
 	/* Collect waiters under lock. */
 	mutex_enter(&bucket->qb_lock);
+	was_enabled = bucket->qb_enabled;
 	bucket->qb_enabled = B_FALSE;
+	/*
+	 * AV-patch48: a bucket can be torn down while still enabled (dataset
+	 * eviction without an explicit qos:enabled=off).  Decrement here so
+	 * dp_qos_enabled_count never leaks above zero, which would otherwise
+	 * keep the ARC miss path resolving datasets forever.
+	 *
+	 * AV-patch48 cycle 2: done under qb_lock (atomic with the qb_enabled
+	 * transition) so the count can never transiently disagree with the
+	 * flag — see qos_bucket_enable for the rationale.
+	 */
+	if (was_enabled && bucket->qb_pool != NULL)
+		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, -1ULL);
 	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
 		list_insert_tail(&drain, w);
 	bucket->qb_waiter_count = 0;
@@ -286,8 +314,29 @@ qos_bucket_configure_split(qos_bucket_t *bucket,
 void
 qos_bucket_enable(qos_bucket_t *bucket)
 {
+	boolean_t was_enabled;
+
 	mutex_enter(&bucket->qb_lock);
+	was_enabled = bucket->qb_enabled;
 	bucket->qb_enabled = B_TRUE;
+	/*
+	 * AV-patch48: bump the per-pool enabled-bucket count on the OFF->ON
+	 * edge only.  dsl_dataset_set_qos_sync() can call this repeatedly
+	 * while already enabled (rate changes), so the was_enabled guard
+	 * keeps the count exact.  qb_pool is assigned before this call (see
+	 * dsl_dataset.c AV-patch48 reorder), so it is non-NULL here.
+	 *
+	 * AV-patch48 cycle 2: the increment is done while still holding
+	 * qb_lock so the count update is atomic with the qb_enabled
+	 * transition.  Without this, a concurrent enable/disable on the same
+	 * bucket could observe qb_enabled and dp_qos_enabled_count out of
+	 * sync between mutex_exit and the atomic, causing a transient
+	 * under/overshoot of the count.  atomic_add_64 never sleeps and
+	 * dp_qos_enabled_count is otherwise lock-free (relaxed read in
+	 * arc.c), so no lock-ordering hazard is introduced.
+	 */
+	if (!was_enabled && bucket->qb_pool != NULL)
+		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, 1);
 	mutex_exit(&bucket->qb_lock);
 }
 
@@ -296,13 +345,26 @@ qos_bucket_disable(qos_bucket_t *bucket)
 {
 	list_t drain;
 	qos_waiter_t *w;
+	boolean_t was_enabled;
 
 	list_create(&drain, sizeof (qos_waiter_t),
 	    offsetof(qos_waiter_t, qw_node));
 
 	/* Collect waiters under lock. */
 	mutex_enter(&bucket->qb_lock);
+	was_enabled = bucket->qb_enabled;
 	bucket->qb_enabled = B_FALSE;
+	/*
+	 * AV-patch48: decrement on the ON->OFF edge only (guard mirrors
+	 * qos_bucket_enable).  This is what lets the ARC miss path stop
+	 * resolving datasets once the last QoS dataset is turned off.
+	 *
+	 * AV-patch48 cycle 2: done under qb_lock (atomic with the qb_enabled
+	 * transition) so the count can never transiently disagree with the
+	 * flag — see qos_bucket_enable for the rationale.
+	 */
+	if (was_enabled && bucket->qb_pool != NULL)
+		atomic_add_64(&bucket->qb_pool->dp_qos_enabled_count, -1ULL);
 	while ((w = list_remove_head(&bucket->qb_waiters)) != NULL)
 		list_insert_tail(&drain, w);
 	bucket->qb_waiter_count = 0;
@@ -358,8 +420,11 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 		 * A non-zero value while buffered writes throttle but O_DIRECT
 		 * writes do not would indicate a qb_enabled race specific to
 		 * the O_DIRECT path.
+		 *
+		 * AV-patch48: gated behind zfs_qos_debug so the QoS-off fast
+		 * path performs no global atomic (zero cache-line bouncing).
 		 */
-		if (type == QOS_IO_WRITE)
+		if (zfs_qos_debug && type == QOS_IO_WRITE)
 			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
 		return (QOS_OK);
 	}
@@ -371,8 +436,10 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 		 * Z-patch18 cycle 1 (H4 probe): race-window fast-path hit
 		 * where disable landed between the lock-free read and the
 		 * slow-path acquire.  Count it under the same H4 counter.
+		 *
+		 * AV-patch48: gated behind zfs_qos_debug (see fast-path above).
 		 */
-		if (type == QOS_IO_WRITE)
+		if (zfs_qos_debug && type == QOS_IO_WRITE)
 			atomic_add_64(&qos_kstat_fastpath_hit_write, 1);
 		mutex_exit(&bucket->qb_lock);
 		return (QOS_OK);
@@ -386,7 +453,14 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	 * a reject on io_size_max is still counted (H1 is a pure entry
 	 * counter, not a success counter).
 	 */
-	if (type == QOS_IO_WRITE) {
+	/*
+	 * AW-patch49: these are file-scope global counters; an unconditional
+	 * atomic_add_64 on every throttled-path WRITE bounces the cache line
+	 * across every CPU servicing any throttled dataset.  Gate behind
+	 * zfs_qos_debug so the enabled hot path pays nothing by default; the
+	 * H1/H2 probes are still available under zfs_qos_debug=1.
+	 */
+	if (zfs_qos_debug && type == QOS_IO_WRITE) {
 		if (io_size > 0)
 			atomic_add_64(&qos_kstat_consume_called_write, 1);
 		else
@@ -396,7 +470,8 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	/* Check io_size_max before refill — hard reject. */
 	if (bucket->qb_io_size_max != 0 &&
 	    io_size > bucket->qb_io_size_max) {
-		atomic_add_64(&bucket->qb_stat_rejected_size, 1);
+		/* AW-patch49: plain increment — written only under qb_lock. */
+		bucket->qb_stat_rejected_size++;
 		mutex_exit(&bucket->qb_lock);
 		return (QOS_IO_TOO_LARGE);
 	}
@@ -404,13 +479,19 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	/* QoS R/W split: select direction sub-bucket (Q-patch10) */
 	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
 
+	/*
+	 * AW-patch49: one gethrtime() per try_consume, shared by both
+	 * refills and the last-consume timestamp below (was a separate
+	 * clock read inside each refill plus one for qb_last_consume_time).
+	 */
+	hrtime_t now = gethrtime();
 	/* Lazy refill both dimensions (surplus ignored in fast path). */
 	(void) qos_refill_with_surplus(&tb->tb_iops_tokens,
 	    tb->tb_iops_rate, tb->tb_iops_burst,
-	    &tb->tb_iops_last_fill);
+	    &tb->tb_iops_last_fill, now);
 	(void) qos_refill_with_surplus(&tb->tb_bw_tokens,
 	    tb->tb_bw_rate, tb->tb_bw_burst,
-	    &tb->tb_bw_last_fill);
+	    &tb->tb_bw_last_fill, now);
 
 	/* Check tokens.  Rate == 0 means "unlimited" for that dimension. */
 	boolean_t iops_ok = (tb->tb_iops_rate == 0) ||
@@ -458,15 +539,16 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 						    (int64_t)io_size;
 					}
 				}
-				atomic_add_64(&tb->tb_stat_total_ios, 1);
-				atomic_add_64(&tb->tb_stat_total_bytes,
-				    io_size);
-				bucket->qb_last_consume_time = gethrtime();
+				/* AW-patch49: plain increments under qb_lock. */
+				tb->tb_stat_total_ios++;
+				tb->tb_stat_total_bytes += io_size;
+				bucket->qb_last_consume_time = now;
 				mutex_exit(&bucket->qb_lock);
 				return (QOS_OK);
 			}
 		}
-		atomic_add_64(&tb->tb_stat_throttle_count, 1);
+		/* AW-patch49: plain increment under qb_lock. */
+		tb->tb_stat_throttle_count++;
 		ret = QOS_THROTTLED;
 	} else {
 		/* Consume only dimensions that have a rate set. */
@@ -474,10 +556,11 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 			tb->tb_iops_tokens -= 1;
 		if (tb->tb_bw_rate > 0)
 			tb->tb_bw_tokens -= (int64_t)io_size;
-		atomic_add_64(&tb->tb_stat_total_ios, 1);
-		atomic_add_64(&tb->tb_stat_total_bytes, io_size);
+		/* AW-patch49: plain increments under qb_lock. */
+		tb->tb_stat_total_ios++;
+		tb->tb_stat_total_bytes += io_size;
 		/* Track last consume time for idle detection. */
-		bucket->qb_last_consume_time = gethrtime();
+		bucket->qb_last_consume_time = now;
 		ret = QOS_OK;
 	}
 
@@ -506,7 +589,9 @@ qos_bucket_try_consume(qos_bucket_t *bucket, qos_io_type_t type,
 			bucket->qb_on_active_list = B_TRUE;
 			/* X-patch16: wake-on-demand per-pool signal. */
 			cv_signal(&pool->dp_qos_wake_cv);
-			atomic_add_64(&qos_kstat_signaled_early, 1);
+			/* AW-patch49: global counter gated behind debug. */
+			if (zfs_qos_debug)
+				atomic_add_64(&qos_kstat_signaled_early, 1);
 		}
 		mutex_exit(&bucket->qb_lock);
 		mutex_exit(&pool->dp_qos_active_lock);
@@ -556,6 +641,15 @@ qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
 {
 	int retries = 0;
 	qos_result_t qr;
+	/*
+	 * AY-patch51: wait-time accounting for the synchronous path.
+	 * wait_start == 0 means "never throttled" (gethrtime() is a
+	 * monotonic clock that never returns 0 post-boot).  The clock is
+	 * read once at first throttle and once at exit — never per retry
+	 * (AW-patch49: one gethrtime() per try_consume preserved).
+	 */
+	hrtime_t wait_start = 0;
+	qos_token_bucket_t *tb;
 
 	/* T-patch12: guard against signed/unsigned cast overflow */
 	VERIFY3U(io_size, <=, SPA_MAXBLOCKSIZE);
@@ -574,7 +668,13 @@ qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
 	do {
 		qr = qos_bucket_try_consume(bucket, type, io_size);
 		if (qr != QOS_THROTTLED)
-			return;
+			break;
+		/*
+		 * AY-patch51: fast path (success on first try) never reaches
+		 * this point, so the clock read below costs nothing there.
+		 */
+		if (wait_start == 0)
+			wait_start = gethrtime();
 		/* Wait for token refill instead of busy-polling */
 		mutex_enter(&bucket->qb_lock);
 		if (!bucket->qb_enabled) {
@@ -585,6 +685,57 @@ qos_bucket_wait_consume(qos_bucket_t *bucket, qos_io_type_t type,
 		    ddi_get_lbolt() + MSEC_TO_TICK(10));
 		mutex_exit(&bucket->qb_lock);
 	} while (++retries < max_retries);
+
+	if (wait_start == 0)
+		return;
+
+	/*
+	 * AY-patch51: credit the time this thread spent blocked to the
+	 * sub-bucket matching the I/O direction (same resolution as
+	 * try_consume).  Also credited on max_retries exhaustion: the I/O
+	 * proceeds degraded but the thread really was blocked for the
+	 * whole retry budget — throttle_ns measures "time spent blocked",
+	 * not "time until tokens were granted".
+	 */
+	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
+	hrtime_t wait_ns = gethrtime() - wait_start;
+	/*
+	 * AY-patch51 cycle 2: same guard as qos_bucket_account_throttle_ns()
+	 * — gethrtime() is monotonic so this never fires in practice; kept
+	 * for consistency between the two throttle_ns writer sites.
+	 */
+	if (wait_ns <= 0)
+		return;
+	mutex_enter(&bucket->qb_lock);
+	/* AW-patch49: plain increment under qb_lock. */
+	tb->tb_stat_throttle_ns_total += wait_ns;
+	mutex_exit(&bucket->qb_lock);
+}
+
+/*
+ * qos_bucket_account_throttle_ns — credit throttle wait time measured by a
+ * caller-side wait loop to the per-direction throttle_ns statistic.
+ *
+ * AY-patch51: the DMU-level write gate (dmu_tx_try_assign) does not sleep
+ * in qos_bucket_wait_consume(); its wait point is dmu_tx_wait()'s
+ * ERESTART/delay(1) loop.  Without this hook that blocked time is invisible
+ * to stat_throttle_ns_write.  The caller measures the elapsed time (it
+ * already reads the clock for spa_tx_assign_add_nsecs) — no additional
+ * gethrtime() here, AW-patch49 clock budget preserved.
+ */
+void
+qos_bucket_account_throttle_ns(qos_bucket_t *bucket, qos_io_type_t type,
+    hrtime_t wait_ns)
+{
+	qos_token_bucket_t *tb;
+
+	if (wait_ns <= 0)
+		return;
+	tb = (type == QOS_IO_READ) ? &bucket->qb_read : &bucket->qb_write;
+	mutex_enter(&bucket->qb_lock);
+	/* AW-patch49: plain increment under qb_lock. */
+	tb->tb_stat_throttle_ns_total += (uint64_t)wait_ns;
+	mutex_exit(&bucket->qb_lock);
 }
 
 /* QoS R/W split: aggregate stats from both directions (Q-patch10) */
@@ -687,26 +838,27 @@ qos_pool_wake_thread(void *arg)
 				}
 
 				/* QoS R/W split: refill both sub-buckets */
+				/* AW-patch49: reuse the wake-cycle `now`. */
 				int64_t bw_sr = qos_refill_with_surplus(
 				    &bucket->qb_read.tb_bw_tokens,
 				    bucket->qb_read.tb_bw_rate,
 				    bucket->qb_read.tb_bw_burst,
-				    &bucket->qb_read.tb_bw_last_fill);
+				    &bucket->qb_read.tb_bw_last_fill, now);
 				int64_t iops_sr = qos_refill_with_surplus(
 				    &bucket->qb_read.tb_iops_tokens,
 				    bucket->qb_read.tb_iops_rate,
 				    bucket->qb_read.tb_iops_burst,
-				    &bucket->qb_read.tb_iops_last_fill);
+				    &bucket->qb_read.tb_iops_last_fill, now);
 				int64_t bw_sw = qos_refill_with_surplus(
 				    &bucket->qb_write.tb_bw_tokens,
 				    bucket->qb_write.tb_bw_rate,
 				    bucket->qb_write.tb_bw_burst,
-				    &bucket->qb_write.tb_bw_last_fill);
+				    &bucket->qb_write.tb_bw_last_fill, now);
 				int64_t iops_sw = qos_refill_with_surplus(
 				    &bucket->qb_write.tb_iops_tokens,
 				    bucket->qb_write.tb_iops_rate,
 				    bucket->qb_write.tb_iops_burst,
-				    &bucket->qb_write.tb_iops_last_fill);
+				    &bucket->qb_write.tb_iops_last_fill, now);
 
 				/* Collect idle surplus from READ sub-bucket */
 				if (is_donor &&
@@ -1003,9 +1155,11 @@ qos_pool_wake_thread(void *arg)
 
 			/*
 			 * ── PASS 3: dispatch waiters ──
-			 * ZIO waiters have no direction (legacy, mostly
-			 * empty after O-patch09).  Use READ sub-bucket
-			 * for token checks (conservatif).
+			 * AY-patch51: resolve the waiter's direction from
+			 * zio->io_type (same source the upstream callers use
+			 * to derive qos_io_type_t) instead of hard-coding
+			 * the READ sub-bucket.  A write waiter now checks,
+			 * consumes and accounts against qb_write.
 			 */
 			for (bucket = list_head(&pool->dp_qos_active_buckets);
 			    bucket != NULL; bucket = next) {
@@ -1016,62 +1170,56 @@ qos_pool_wake_thread(void *arg)
 				while ((w = list_head(&bucket->qb_waiters))
 				    != NULL) {
 					uint64_t sz = w->qw_zio->io_size;
+					/*
+					 * AY-patch51: per-direction
+					 * sub-bucket (was qb_read hard-coded
+					 * for checks, tokens and stats).
+					 */
+					qos_token_bucket_t *wtb =
+					    (w->qw_zio->io_type ==
+					    ZIO_TYPE_READ) ?
+					    &bucket->qb_read :
+					    &bucket->qb_write;
 					boolean_t iok =
-					    (bucket->qb_read.
-					    tb_iops_rate == 0) ||
-					    (bucket->qb_read.
-					    tb_iops_tokens >= 1) ||
+					    (wtb->tb_iops_rate == 0) ||
+					    (wtb->tb_iops_tokens >= 1) ||
 					    (bucket->qb_boost_factor > 0 &&
-					    bucket->qb_read.
-					    tb_boost_iops_tokens >= 1);
+					    wtb->tb_boost_iops_tokens >= 1);
 					boolean_t bwok =
-					    (bucket->qb_read.
-					    tb_bw_rate == 0) ||
-					    (bucket->qb_read.tb_bw_tokens >=
+					    (wtb->tb_bw_rate == 0) ||
+					    (wtb->tb_bw_tokens >=
 					    (int64_t)sz) ||
 					    (bucket->qb_boost_factor > 0 &&
-					    bucket->qb_read.
-					    tb_boost_bw_tokens >=
+					    wtb->tb_boost_bw_tokens >=
 					    (int64_t)sz);
 					if (!iok || !bwok)
 						break;
 					/* Consume own tokens first, boost */
-					if (bucket->qb_read.
-					    tb_iops_rate > 0) {
-						if (bucket->qb_read.
-						    tb_iops_tokens >= 1)
-							bucket->qb_read.
-							    tb_iops_tokens--;
+					if (wtb->tb_iops_rate > 0) {
+						if (wtb->tb_iops_tokens >= 1)
+							wtb->tb_iops_tokens--;
 						else
-							bucket->qb_read.
+							wtb->
 							    tb_boost_iops_tokens
 							    --;
 					}
-					if (bucket->qb_read.
-					    tb_bw_rate > 0) {
-						if (bucket->qb_read.
-						    tb_bw_tokens >=
+					if (wtb->tb_bw_rate > 0) {
+						if (wtb->tb_bw_tokens >=
 						    (int64_t)sz)
-							bucket->qb_read.
-							    tb_bw_tokens -=
+							wtb->tb_bw_tokens -=
 							    (int64_t)sz;
 						else
-							bucket->qb_read.
+							wtb->
 							    tb_boost_bw_tokens
 							    -= (int64_t)sz;
 					}
-					atomic_add_64(
-					    &bucket->qb_read.
-					    tb_stat_total_ios, 1);
-					atomic_add_64(
-					    &bucket->qb_read.
-					    tb_stat_total_bytes, sz);
+					/* AW-patch49: plain increments under qb_lock. */
+					wtb->tb_stat_total_ios++;
+					wtb->tb_stat_total_bytes += sz;
 					hrtime_t wait_ns =
 					    gethrtime() - w->qw_enqueue_time;
-					atomic_add_64(
-					    &bucket->qb_read.
-					    tb_stat_throttle_ns_total,
-					    wait_ns);
+					wtb->tb_stat_throttle_ns_total
+					    += wait_ns;
 					list_remove(&bucket->qb_waiters, w);
 					bucket->qb_waiter_count--;
 					w->qw_zio->io_qos_waiter = NULL;
@@ -1231,3 +1379,8 @@ qos_system_fini(void)
 ZFS_MODULE_PARAM(zfs, zfs_, qos_read_timeout_ms, INT, ZMOD_RW,
 	"Max milliseconds for a throttled read I/O to wait for tokens "
 	"(default 10000, floor 100). Set below NFS client timeo value.");
+
+/* AV-patch48: diagnostic probes off by default for zero QoS-off overhead. */
+ZFS_MODULE_PARAM(zfs, zfs_, qos_debug, INT, ZMOD_RW,
+	"Enable QoS diagnostic atomics (fastpath/objset-null probes); "
+	"0=disabled for zero overhead when QoS is off (default).");

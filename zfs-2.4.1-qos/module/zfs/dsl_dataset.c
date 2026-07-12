@@ -464,6 +464,23 @@ dsl_dataset_evict_async(void *dbu)
 
 	ASSERT0P(ds->ds_owner);
 
+	/*
+	 * AZ-patch52 sentinel: a dsl_dataset_t must never be freed while
+	 * long holds are outstanding — every holder is expected to also
+	 * hold the bonus dbuf, which pins this memory.  The removed ARC
+	 * b_dataset tagging violated exactly this (long_hold without a
+	 * dbuf hold) and produced use-after-free writes.  Fires only on
+	 * eviction, so the cost is nil; a hit means a new lifetime bug.
+	 */
+	if (zfs_refcount_count(&ds->ds_longholds) != 0) {
+		zfs_dbgmsg("AZ52 UAF-WINDOW: evict ds %llu longholds=%lld "
+		    "qb_enabled=%d on_active_list=%d",
+		    (u_longlong_t)ds->ds_object,
+		    (longlong_t)zfs_refcount_count(&ds->ds_longholds),
+		    (int)ds->ds_qos.qb_enabled,
+		    (int)ds->ds_qos.qb_on_active_list);
+	}
+
 	ds->ds_dbuf = NULL;
 
 	if (ds->ds_objset != NULL)
@@ -720,6 +737,18 @@ qos_prop_apply(dsl_dataset_t *ds)
 	boolean_t has_rates = (iops_read_rate > 0 || iops_write_rate > 0 ||
 	    bw_read_rate > 0 || bw_write_rate > 0);
 
+	/*
+	 * AV-patch48: bind the bucket to its pool BEFORE enable/disable.
+	 * qos_bucket_enable() now reads qb_pool to maintain the per-pool
+	 * dp_qos_enabled_count; previously qb_pool was assigned further
+	 * below (after the enable call), so on the first enable it was
+	 * still NULL and the count was never incremented.  This assignment
+	 * is idempotent and the value is otherwise only used by the active
+	 * list / wake-thread bookkeeping, so moving it up is side-effect
+	 * free.
+	 */
+	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
+
 	if (has_rates && qos_enabled) {
 		qos_bucket_configure_split(&ds->ds_qos,
 		    iops_read_rate, bw_read_rate,
@@ -734,9 +763,6 @@ qos_prop_apply(dsl_dataset_t *ds)
 	}
 
 	/* QoS Boost: apply boost config per direction (patch08 + Q-patch10) */
-	ds->ds_qos.qb_boost_factor = boost_factor;
-	ds->ds_qos.qb_boost_pool =
-	    (boost_pool_val != 0) ? B_TRUE : B_FALSE;
 	/*
 	 * QoS Boost caps — token storage limit (P-patch08).
 	 *
@@ -748,7 +774,18 @@ qos_prop_apply(dsl_dataset_t *ds)
 	 * Throughput is self-regulated: donors donate in bursts (~1×/sec),
 	 * and try_consume() only uses boost for the shortfall after
 	 * normal tokens are exhausted, preventing drain+refill cycling.
+	 *
+	 * AZ-patch52: all boost fields (factor, pool flag, 4 caps) are now
+	 * written under qb_lock.  The wake thread reads qb_boost_factor in
+	 * pass 1 and the caps in pass 2 under qb_lock, and try_consume()
+	 * reads them under qb_lock; writing them lock-free here violated
+	 * the "qos_token_bucket_t mutations only under qb_lock" invariant
+	 * kept everywhere else (Curator hypothesis 4, confirmed data race).
 	 */
+	mutex_enter(&ds->ds_qos.qb_lock);
+	ds->ds_qos.qb_boost_factor = boost_factor;
+	ds->ds_qos.qb_boost_pool =
+	    (boost_pool_val != 0) ? B_TRUE : B_FALSE;
 	ds->ds_qos.qb_read.tb_boost_bw_cap =
 	    (boost_factor > 0 &&
 	    bw_read_rate > INT64_MAX / (int64_t)boost_factor) ?
@@ -765,12 +802,10 @@ qos_prop_apply(dsl_dataset_t *ds)
 	    (boost_factor > 0 &&
 	    iops_write_rate > INT64_MAX / (int64_t)boost_factor) ?
 	    INT64_MAX : (int64_t)boost_factor * iops_write_rate;
-	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
-
 	/* QoS Unify: apply count_arc_hits config (O-patch09) */
-	mutex_enter(&ds->ds_qos.qb_lock);
 	ds->ds_qos.qb_count_arc_hits = count_arc_hits;
 	mutex_exit(&ds->ds_qos.qb_lock);
+	/* AV-patch48: qb_pool now assigned above, before enable/disable. */
 
 	/*
 	 * If boost_pool=1 is set on an enabled bucket, add it to the
@@ -921,10 +956,24 @@ dsl_dataset_hold_obj(dsl_pool_t *dp, uint64_t dsobj, const void *tag,
 			ds->ds_reserved = ds->ds_quota = 0;
 		}
 
-		/* QoS: configure token bucket + kstat for non-snapshots. */
-		if (err == 0 && !ds->ds_is_snapshot) {
-			qos_prop_apply(ds);
-		}
+		/*
+		 * AZ-patch52 cycle 2: qos_prop_apply() used to be called
+		 * here, BEFORE the dmu_buf_set_user_ie() winner/loser
+		 * resolution below.  A losing copy of a concurrently loaded
+		 * dataset thus added its bw_write_rate to dp_qos_total_bw
+		 * (qos_prop_apply pool-wide dirty quota block) and was then
+		 * destroyed without ever removing it (qos_bucket_fini does
+		 * not touch dp_qos_total_bw) — permanent, cumulative
+		 * overestimation of the pool total on every concurrent-load
+		 * race.  The call now happens on the published dataset only
+		 * (else branch below), so a loser never touches pool-wide
+		 * state.  Nothing between this point and the else branch
+		 * reads ds_qos (deadlist open, crypto errata,
+		 * dmu_buf_init_user — verified), and the bucket stays in its
+		 * qos_bucket_init() default (disabled → try_consume
+		 * fast-path QOS_OK) for the few instructions until it is
+		 * configured.
+		 */
 
 		if (err == 0 && ds->ds_dir->dd_crypto_obj != 0 &&
 		    ds->ds_is_snapshot &&
@@ -966,6 +1015,22 @@ after_dsl_bookmark_fini:
 					unload_zfeature(ds, f);
 			}
 
+			/*
+			 * AZ-patch52 diagnostic: concurrent-load loser
+			 * teardown (two threads raced dsl_dataset_hold_obj
+			 * on the same object; this copy lost
+			 * dmu_buf_set_user_ie and is freed immediately).
+			 * Cycle 2: qos_prop_apply() no longer runs on this
+			 * copy (moved after winner resolution), so
+			 * qb_enabled/on_active_list must always log 0/0 here
+			 * and dp_qos_total_bw is untouched by the loser.
+			 */
+			zfs_dbgmsg("AZ52 loser-race: ds %llu err=%d "
+			    "qb_enabled=%d on_active_list=%d",
+			    (u_longlong_t)ds->ds_object, err,
+			    (int)ds->ds_qos.qb_enabled,
+			    (int)ds->ds_qos.qb_on_active_list);
+
 			list_destroy(&ds->ds_prop_cbs);
 			list_destroy(&ds->ds_sendstreams);
 			bplist_destroy(&ds->ds_pending_deadlist);
@@ -996,6 +1061,21 @@ after_dsl_bookmark_fini:
 				    spa_name(dp->dp_spa),
 				    (u_longlong_t)dsobj);
 			}
+			/*
+			 * QoS: configure token bucket + kstat for
+			 * non-snapshots.  AZ-patch52 cycle 2: called on the
+			 * PUBLISHED dataset only (this thread won
+			 * dmu_buf_set_user_ie above; err == 0 in this
+			 * branch), so dp_qos_total_bw is only ever fed by
+			 * datasets that survive — the loser path above never
+			 * calls it.  A concurrent holder that grabs the
+			 * winner before this call runs sees the
+			 * qos_bucket_init() default (disabled bucket,
+			 * try_consume fast-path) for a few microseconds —
+			 * same window the loser thread always had.
+			 */
+			if (!ds->ds_is_snapshot)
+				qos_prop_apply(ds);
 		}
 	}
 
