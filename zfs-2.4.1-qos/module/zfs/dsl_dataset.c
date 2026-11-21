@@ -466,7 +466,7 @@ dsl_dataset_evict_async(void *dbu)
 
 	/*
 	 * AZ-patch52 sentinel: a dsl_dataset_t must never be freed while
-	 * long holds are outstanding — every holder is expected to also
+	 * long holds are outstanding - every holder is expected to also
 	 * hold the bonus dbuf, which pins this memory.  The removed ARC
 	 * b_dataset tagging violated exactly this (long_hold without a
 	 * dbuf hold) and produced use-after-free writes.  Fires only on
@@ -615,6 +615,21 @@ dsl_dataset_try_add_ref(dsl_pool_t *dp, dsl_dataset_t *ds, const void *tag)
 }
 
 /*
+ * QoS: a rate read from a property, as the signed value the bucket stores.
+ * The string is parsed as an unsigned 64-bit integer; converted as is, a
+ * value above INT64_MAX became negative (limit silently ignored) and a value
+ * above INT64_MAX / 2 overflowed the burst (every write on the dataset then
+ * waited for ever).  Anything above QOS_RATE_MAX means QOS_RATE_MAX.
+ */
+static int64_t
+qos_rate_from_prop(unsigned long long v)
+{
+	if (v > (unsigned long long)QOS_RATE_MAX)
+		return (QOS_RATE_MAX);
+	return ((int64_t)v);
+}
+
+/*
  * QoS: read qos:* user properties and configure the token bucket.
  * Called at dataset load and on dynamic property change.
  * Properties are stored as strings in ZAP; read via dsl_prop_get_ds.
@@ -659,7 +674,7 @@ qos_prop_apply(dsl_dataset_t *ds)
 			boost_pool_val = (tmp != 0) ? 1 : 0;
 	}
 
-	/* qos:count_arc_hits — default: B_TRUE (count all reads) */
+	/* qos:count_arc_hits - default: B_TRUE (count all reads) */
 	boolean_t count_arc_hits = B_TRUE;
 	if (dsl_prop_get_ds(ds, "qos:count_arc_hits", 1, sizeof (buf),
 	    buf, NULL) == 0) {
@@ -678,7 +693,7 @@ qos_prop_apply(dsl_dataset_t *ds)
 			    (unsigned long long)ds->ds_object, buf);
 			tmp = 0;
 		}
-		bw_read_rate = (int64_t)tmp;
+		bw_read_rate = qos_rate_from_prop(tmp);
 	}
 	if (dsl_prop_get_ds(ds, "qos:max_bw_write", 1, sizeof (buf),
 	    buf, NULL) == 0) {
@@ -687,7 +702,7 @@ qos_prop_apply(dsl_dataset_t *ds)
 			    (unsigned long long)ds->ds_object, buf);
 			tmp = 0;
 		}
-		bw_write_rate = (int64_t)tmp;
+		bw_write_rate = qos_rate_from_prop(tmp);
 	}
 	if (dsl_prop_get_ds(ds, "qos:max_iops_read", 1, sizeof (buf),
 	    buf, NULL) == 0) {
@@ -696,7 +711,7 @@ qos_prop_apply(dsl_dataset_t *ds)
 			    (unsigned long long)ds->ds_object, buf);
 			tmp = 0;
 		}
-		iops_read_rate = (int64_t)tmp;
+		iops_read_rate = qos_rate_from_prop(tmp);
 	}
 	if (dsl_prop_get_ds(ds, "qos:max_iops_write", 1, sizeof (buf),
 	    buf, NULL) == 0) {
@@ -705,11 +720,11 @@ qos_prop_apply(dsl_dataset_t *ds)
 			    (unsigned long long)ds->ds_object, buf);
 			tmp = 0;
 		}
-		iops_write_rate = (int64_t)tmp;
+		iops_write_rate = qos_rate_from_prop(tmp);
 	}
 
 	/*
-	 * AF-patch25 R1: read qos:enabled — if off, force the bucket
+	 * AF-patch25 R1: read qos:enabled - if off, force the bucket
 	 * disabled even when rate properties are still set.  Before this
 	 * patch, qos_prop_apply() ignored qos:enabled entirely so the
 	 * "off" string was persisted in ZAP but never propagated to
@@ -723,9 +738,11 @@ qos_prop_apply(dsl_dataset_t *ds)
 			qos_enabled = B_FALSE;
 	}
 
-	/* Track old BW rate for pool-wide total update */
+	/* Track old BW rates for the pool-wide totals update */
 	int64_t old_bw = ds->ds_qos.qb_enabled ?
 	    ds->ds_qos.qb_write.tb_bw_rate : 0;
+	int64_t old_bw_read = ds->ds_qos.qb_enabled ?
+	    ds->ds_qos.qb_read.tb_bw_rate : 0;
 
 	/*
 	 * AF-patch25 R2: the gate is (has_rates && qos_enabled).  Either
@@ -749,6 +766,19 @@ qos_prop_apply(dsl_dataset_t *ds)
 	 */
 	ds->ds_qos.qb_pool = ds->ds_dir->dd_pool;
 
+	/*
+	 * The common case: a dataset that has no limit and never had one in
+	 * this incarnation.  The bucket is in its qos_bucket_init() state
+	 * (disabled, off the active list, no kstat, no dirty quota) and the
+	 * pool totals do not change, so there is nothing to do: no lock, no
+	 * debug message.  Every dataset of a pool that does not use QoS takes
+	 * this exit each time it is instantiated.
+	 */
+	if (!(has_rates && qos_enabled) && !ds->ds_qos.qb_enabled &&
+	    !ds->ds_qos.qb_on_active_list && ds->ds_qos_kstat == NULL &&
+	    ds->ds_dirty_quota == 0)
+		return;
+
 	if (has_rates && qos_enabled) {
 		qos_bucket_configure_split(&ds->ds_qos,
 		    iops_read_rate, bw_read_rate,
@@ -764,14 +794,14 @@ qos_prop_apply(dsl_dataset_t *ds)
 
 	/* QoS Boost: apply boost config per direction (patch08 + Q-patch10) */
 	/*
-	 * QoS Boost caps — token storage limit (P-patch08).
+	 * QoS Boost caps - token storage limit (P-patch08).
 	 *
 	 * The cap limits how many boost tokens can be stored at any instant.
-	 * Set to boost_factor × rate (one second of boost throughput).
+	 * Set to boost_factor x rate (one second of boost throughput).
 	 * Must be large enough for a single I/O so try_consume() can
 	 * combine normal + boost tokens (see qos_bucket.c).
 	 *
-	 * Throughput is self-regulated: donors donate in bursts (~1×/sec),
+	 * Throughput is self-regulated: donors donate in bursts (~1x/sec),
 	 * and try_consume() only uses boost for the shortfall after
 	 * normal tokens are exhausted, preventing drain+refill cycling.
 	 *
@@ -780,7 +810,7 @@ qos_prop_apply(dsl_dataset_t *ds)
 	 * pass 1 and the caps in pass 2 under qb_lock, and try_consume()
 	 * reads them under qb_lock; writing them lock-free here violated
 	 * the "qos_token_bucket_t mutations only under qb_lock" invariant
-	 * kept everywhere else (Curator hypothesis 4, confirmed data race).
+	 * kept everywhere else (a confirmed data race).
 	 */
 	mutex_enter(&ds->ds_qos.qb_lock);
 	ds->ds_qos.qb_boost_factor = boost_factor;
@@ -838,14 +868,31 @@ qos_prop_apply(dsl_dataset_t *ds)
 
 	/* QoS: update pool-wide dirty quota (F-patch05 + Q-patch10) */
 	{
-		int64_t new_bw = (iops_read_rate > 0 || iops_write_rate > 0 ||
-		    bw_read_rate > 0 || bw_write_rate > 0) ?
+		/*
+		 * QoS: only an enabled bucket contributes to the live
+		 * aggregate.
+		 * Keeping rate properties while qos:enabled=off must not
+		 * reserve
+		 * dirty-data quota or inflate the persistent-surplus cap.
+		 */
+		int64_t new_bw = (has_rates && qos_enabled) ?
 		    bw_write_rate : 0;
+		/*
+		 * The read rates are summed apart: the read boost reserve
+		 * is capped by them.  Capped by the write sum, a pool whose
+		 * datasets only had read limits kept no read reserve at all
+		 * and a read boost got nothing.
+		 */
+		int64_t new_bw_read = (has_rates && qos_enabled) ?
+		    bw_read_rate : 0;
 		dsl_pool_t *dp = ds->ds_dir->dd_pool;
 		mutex_enter(&dp->dp_lock);
 		dp->dp_qos_total_bw =
 		    dp->dp_qos_total_bw - (uint64_t)old_bw +
 		    (uint64_t)new_bw;
+		dp->dp_qos_total_bw_read =
+		    dp->dp_qos_total_bw_read - (uint64_t)old_bw_read +
+		    (uint64_t)new_bw_read;
 		mutex_exit(&dp->dp_lock);
 	}
 	dsl_pool_qos_dirty_update(ds);
@@ -963,14 +1010,14 @@ dsl_dataset_hold_obj(dsl_pool_t *dp, uint64_t dsobj, const void *tag,
 		 * dataset thus added its bw_write_rate to dp_qos_total_bw
 		 * (qos_prop_apply pool-wide dirty quota block) and was then
 		 * destroyed without ever removing it (qos_bucket_fini does
-		 * not touch dp_qos_total_bw) — permanent, cumulative
+		 * not touch dp_qos_total_bw) - permanent, cumulative
 		 * overestimation of the pool total on every concurrent-load
 		 * race.  The call now happens on the published dataset only
 		 * (else branch below), so a loser never touches pool-wide
 		 * state.  Nothing between this point and the else branch
 		 * reads ds_qos (deadlist open, crypto errata,
-		 * dmu_buf_init_user — verified), and the bucket stays in its
-		 * qos_bucket_init() default (disabled → try_consume
+		 * dmu_buf_init_user - verified), and the bucket stays in its
+		 * qos_bucket_init() default (disabled -> try_consume
 		 * fast-path QOS_OK) for the few instructions until it is
 		 * configured.
 		 */
@@ -1025,11 +1072,14 @@ after_dsl_bookmark_fini:
 			 * qb_enabled/on_active_list must always log 0/0 here
 			 * and dp_qos_total_bw is untouched by the loser.
 			 */
-			zfs_dbgmsg("AZ52 loser-race: ds %llu err=%d "
-			    "qb_enabled=%d on_active_list=%d",
-			    (u_longlong_t)ds->ds_object, err,
-			    (int)ds->ds_qos.qb_enabled,
-			    (int)ds->ds_qos.qb_on_active_list);
+			if (zfs_qos_debug) {
+				zfs_dbgmsg("AZ52 loser-race: ds %llu "
+				    "err=%d qb_enabled=%d "
+				    "on_active_list=%d",
+				    (u_longlong_t)ds->ds_object, err,
+				    (int)ds->ds_qos.qb_enabled,
+				    (int)ds->ds_qos.qb_on_active_list);
+			}
 
 			list_destroy(&ds->ds_prop_cbs);
 			list_destroy(&ds->ds_sendstreams);
@@ -1067,11 +1117,11 @@ after_dsl_bookmark_fini:
 			 * PUBLISHED dataset only (this thread won
 			 * dmu_buf_set_user_ie above; err == 0 in this
 			 * branch), so dp_qos_total_bw is only ever fed by
-			 * datasets that survive — the loser path above never
+			 * datasets that survive - the loser path above never
 			 * calls it.  A concurrent holder that grabs the
 			 * winner before this call runs sees the
 			 * qos_bucket_init() default (disabled bucket,
-			 * try_consume fast-path) for a few microseconds —
+			 * try_consume fast-path) for a few microseconds -
 			 * same window the loser thread always had.
 			 */
 			if (!ds->ds_is_snapshot)

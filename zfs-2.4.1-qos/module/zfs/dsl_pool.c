@@ -243,15 +243,20 @@ dsl_pool_open_impl(spa_t *spa, uint64_t txg)
 	dp->dp_qos_surplus_iops_read = 0;
 	dp->dp_qos_surplus_iops_write = 0;
 
-	/* X-patch16: per-pool wake thread (replaces global qos_wake_thread) */
+	/*
+	 * QoS: state of the per-pool wake thread.  The thread itself is not
+	 * created here: a pool gets it when its first bucket is enabled
+	 * (qos_pool_wake_start) and keeps it until dsl_pool_close().  A pool
+	 * on which no qos:* limit is ever set never has the thread.
+	 */
 	mutex_init(&dp->dp_qos_wake_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&dp->dp_qos_wake_cv, NULL, CV_DEFAULT, NULL);
-	dp->dp_qos_wake_running = B_TRUE;
+	dp->dp_qos_wake_running = B_FALSE;
+	dp->dp_qos_wake_closing = B_FALSE;
+	dp->dp_qos_wake_thr = NULL;
 	dp->dp_qos_wake_idle_cycles = 0;
 	dp->dp_qos_wake_mode = 0;
 	dp->dp_qos_wake_last_time = 0;   /* X-patch16 c3: per-pool cadence */
-	dp->dp_qos_wake_thr = thread_create(NULL, 0, qos_pool_wake_thread,
-	    dp, 0, &p0, TS_RUN, defclsyspri);
 
 	return (dp);
 }
@@ -466,8 +471,13 @@ dsl_pool_close(dsl_pool_t *dp)
 	 * and cv_broadcasts dp_qos_wake_cv under dp_qos_wake_lock right
 	 * before thread_exit().  We wait for the NULL sentinel to know the
 	 * thread will no longer touch the lock/CV we are about to destroy.
+	 *
+	 * The thread only exists if a bucket of this pool was enabled.
+	 * dp_qos_wake_closing keeps qos_pool_wake_start() from creating it
+	 * from now on; if it was never created, there is nothing to wait for.
 	 */
 	mutex_enter(&dp->dp_qos_wake_lock);
+	dp->dp_qos_wake_closing = B_TRUE;
 	dp->dp_qos_wake_running = B_FALSE;
 	cv_signal(&dp->dp_qos_wake_cv);
 	while (dp->dp_qos_wake_thr != NULL) {
@@ -1089,10 +1099,11 @@ dsl_pool_qos_dirty_update(dsl_dataset_t *ds)
 	dsl_pool_t *dp = ds->ds_dir->dd_pool;
 	/* QoS R/W split: use write BW rate for dirty quota (Q-patch10) */
 	int64_t bw_rate = ds->ds_qos.qb_write.tb_bw_rate;
-	uint64_t total_bw;
+	uint64_t total_bw, total_bw_read;
 
 	mutex_enter(&dp->dp_lock);
 	total_bw = dp->dp_qos_total_bw;
+	total_bw_read = dp->dp_qos_total_bw_read;
 	if (total_bw > 0 && bw_rate > 0) {
 		uint64_t bw = (uint64_t)bw_rate;
 		uint64_t dm = zfs_dirty_data_max;
@@ -1113,13 +1124,17 @@ dsl_pool_qos_dirty_update(dsl_dataset_t *ds)
 	}
 	mutex_exit(&dp->dp_lock);
 
-	zfs_dbgmsg("QoS dirty quota ds %llu: bw=%lld total_bw=%llu "
-	    "dirty_max=%llu quota=%llu",
-	    (u_longlong_t)ds->ds_object,
-	    (longlong_t)bw_rate,
-	    (u_longlong_t)total_bw,
-	    (u_longlong_t)zfs_dirty_data_max,
-	    (u_longlong_t)ds->ds_dirty_quota);
+	/* Diagnostic only: one line per configured dataset, off by default. */
+	if (zfs_qos_debug) {
+		zfs_dbgmsg("QoS dirty quota ds %llu: bw=%lld total_bw=%llu "
+		    "dirty_max=%llu quota=%llu total_bw_read=%llu",
+		    (u_longlong_t)ds->ds_object,
+		    (longlong_t)bw_rate,
+		    (u_longlong_t)total_bw,
+		    (u_longlong_t)zfs_dirty_data_max,
+		    (u_longlong_t)ds->ds_dirty_quota,
+		    (u_longlong_t)total_bw_read);
+	}
 }
 
 static int

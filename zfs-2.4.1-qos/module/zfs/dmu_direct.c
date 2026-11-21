@@ -222,8 +222,6 @@ dmu_write_abd(dnode_t *dn, uint64_t offset, uint64_t size,
 		return (err);
 
 	zio_t *pio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
-	if (dn->dn_objset->os_dsl_dataset != NULL)
-		pio->io_dataset = dn->dn_objset->os_dsl_dataset;
 
 	for (int i = 0; i < numbufs && err == 0; i++) {
 		dmu_buf_impl_t *db = (dmu_buf_impl_t *)dbp[i];
@@ -264,8 +262,6 @@ dmu_read_abd(dnode_t *dn, uint64_t offset, uint64_t size,
 		return (err);
 
 	zio_t *rio = zio_root(spa, NULL, NULL, ZIO_FLAG_CANFAIL);
-	if (os->os_dsl_dataset != NULL)
-		rio->io_dataset = os->os_dsl_dataset;
 
 	for (int i = 0; i < numbufs; i++) {
 		dmu_buf_impl_t *db = (dmu_buf_impl_t *)dbp[i];

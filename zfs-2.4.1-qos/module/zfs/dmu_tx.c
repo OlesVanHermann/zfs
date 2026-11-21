@@ -353,6 +353,7 @@ dmu_tx_count_dnode(dmu_tx_hold_t *txh)
 {
 	(void) zfs_refcount_add_many(&txh->txh_space_towrite,
 	    DNODE_MIN_SIZE, FTAG);
+	txh->txh_tx->tx_qos_dnode_bytes += DNODE_MIN_SIZE;
 }
 
 void
@@ -369,6 +370,7 @@ dmu_tx_hold_write(dmu_tx_t *tx, uint64_t object, uint64_t off, int len)
 	if (txh != NULL) {
 		dmu_tx_count_write(txh, off, len);
 		dmu_tx_count_dnode(txh);
+		tx->tx_qos_data_bytes += len;
 	}
 }
 
@@ -385,6 +387,7 @@ dmu_tx_hold_write_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off, int len)
 	if (txh != NULL) {
 		dmu_tx_count_write(txh, off, len);
 		dmu_tx_count_dnode(txh);
+		tx->tx_qos_data_bytes += len;
 	}
 }
 
@@ -406,6 +409,7 @@ dmu_tx_hold_append(dmu_tx_t *tx, uint64_t object, uint64_t off, int len)
 	if (txh != NULL) {
 		dmu_tx_count_append(txh, off, len);
 		dmu_tx_count_dnode(txh);
+		tx->tx_qos_data_bytes += len;
 	}
 }
 
@@ -421,6 +425,7 @@ dmu_tx_hold_append_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off, int len)
 	if (txh != NULL) {
 		dmu_tx_count_append(txh, off, len);
 		dmu_tx_count_dnode(txh);
+		tx->tx_qos_data_bytes += len;
 	}
 }
 
@@ -1157,14 +1162,29 @@ dmu_tx_try_assign(dmu_tx_t *tx)
 		dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
 		if (ds != NULL && !ds->ds_is_snapshot &&
 		    ds->ds_qos.qb_enabled && towrite > 0) {
+			/*
+			 * What the transaction is charged.  A plain data
+			 * write - nothing held but data and the dnodes it
+			 * touches - costs its data: the DNODE_MIN_SIZE
+			 * reserved per held dnode is space accounting, not
+			 * something the client wrote, and made a 4K write
+			 * cost 5120 bytes.  Any other transaction (a create,
+			 * a rename, a write that also reserves a spill block
+			 * or a ZAP) is charged its whole reservation, as
+			 * before.
+			 */
+			uint64_t qos_bytes = towrite;
+			if (tx->tx_qos_data_bytes > 0 && towrite ==
+			    tx->tx_qos_data_bytes + tx->tx_qos_dnode_bytes)
+				qos_bytes = tx->tx_qos_data_bytes;
 			qos_result_t qr = qos_bucket_try_consume(
-			    &ds->ds_qos, QOS_IO_WRITE, towrite);
+			    &ds->ds_qos, QOS_IO_WRITE, qos_bytes);
 			if (qr == QOS_THROTTLED) {
 				tx->tx_qos_throttled = B_TRUE;
 				return (SET_ERROR(ERESTART));
 			}
 			/* Track consumed bytes for potential refund on abort */
-			tx->tx_qos_consumed_bytes = towrite;
+			tx->tx_qos_consumed_bytes = qos_bytes;
 		}
 	} else if (towrite > 0) {
 		/*
@@ -1241,7 +1261,7 @@ dmu_tx_unassign(dmu_tx_t *tx)
 	 * attempt.  Relocated here from dmu_tx_commit(): commit is the
 	 * success path (the consumption must stand), while unassign is
 	 * reached either on ERESTART retries inside dmu_tx_assign() or
-	 * from dmu_tx_abort() — both are the "tokens did not back real
+	 * from dmu_tx_abort() - both are the "tokens did not back real
 	 * work" path.  The Y-scale port erroneously put the refund in
 	 * commit(), netting every WRITE to zero tokens and making the
 	 * BW gate ineffective for O_DIRECT (and any other) write path.
@@ -1417,7 +1437,7 @@ dmu_tx_wait(dmu_tx_t *tx)
 	if (tx->tx_qos_throttled) {
 		/*
 		 * QoS: DMU-level bandwidth throttle.
-		 * Token bucket is empty — sleep 1 tick to allow refill.
+		 * Token bucket is empty - sleep 1 tick to allow refill.
 		 * Keep the sleep minimal (1 tick = 1ms on HZ=1000, 4ms
 		 * on HZ=250) to avoid starving the NFS server thread pool.
 		 * The token bucket refills lazily on the next
@@ -1428,7 +1448,7 @@ dmu_tx_wait(dmu_tx_t *tx)
 		hrtime_t qos_waited = gethrtime() - before;
 		/*
 		 * AY-patch51: this loop is the only wait point of the
-		 * DMU-level write gate — credit the blocked time to
+		 * DMU-level write gate - credit the blocked time to
 		 * stat_throttle_ns_write (direction is always WRITE here:
 		 * tx_qos_throttled is set exclusively by the QOS_IO_WRITE
 		 * try_consume in dmu_tx_try_assign).  Reuses the clock
@@ -1447,7 +1467,7 @@ dmu_tx_wait(dmu_tx_t *tx)
 	}
 
 	if (tx->tx_wait_dirty) {
-		/* QoS: per-dataset dirty quota — wait for TXG sync */
+		/* QoS: per-dataset dirty quota - wait for TXG sync */
 		if (tx->tx_objset != NULL) {
 			dsl_dataset_t *ds = dmu_objset_ds(tx->tx_objset);
 			if (ds != NULL && !ds->ds_is_snapshot &&
@@ -1547,7 +1567,7 @@ dmu_tx_commit(dmu_tx_t *tx)
 
 	/*
 	 * Z-patch19: the QoS refund block that used to live here has been
-	 * moved to dmu_tx_unassign().  Commit is the success path — the
+	 * moved to dmu_tx_unassign().  Commit is the success path - the
 	 * BW/IOPS tokens consumed at try_assign() must stand to rate-limit
 	 * real work.  Refunding here nets every write to zero tokens and
 	 * bypasses the cap; see dmu_tx_unassign() for the relocated block.

@@ -1,0 +1,6 @@
+[submodule "zfs-2.4.1-qos/scripts/zfs-images"]
+	path = zfs-2.4.1-qos/scripts/zfs-images
+	url = https://github.com/openzfs/zfs-images
+[submodule "zfs-2.4.4-qos/scripts/zfs-images"]
+	path = zfs-2.4.4-qos/scripts/zfs-images
+	url = https://github.com/openzfs/zfs-images

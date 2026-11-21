@@ -23,7 +23,7 @@ via `$BASH_SOURCE`).
 ## Typical session
 
 ```bash
-cd /home/ubuntu/multi-agent/project/openzfs-qos/tests/qos-stress
+cd tests/qos-stress
 
 # 1. Populate
 bash create_datasets.sh 2000 testqos
@@ -43,7 +43,7 @@ cat reports/${RUN_ID}.md
 bash teardown.sh testqos
 ```
 
-## Target metrics (from memory cycle 1 spec)
+## Target metrics
 
 | Metric | no patch | + S | + S+U | + S+U+X |
 |---|---|---|---|---|
@@ -51,7 +51,7 @@ bash teardown.sh testqos
 | `qb_lock` rank in top10 (no-QoS load) | #1–3 | **absent** | absent | absent |
 | `qos_active_pools_lock` rank | present | present | present | **absent** |
 
-These are the pass/fail thresholds for the Observer (357-557).
+These are the pass/fail thresholds.
 
 ## Environment assumptions
 
@@ -80,8 +80,7 @@ Local test pool:
 Pool : testqos   (image-backed vdev under .../test-env/)
 ```
 
-Heavier runs go in the `zfs-test` VM — see the Dev contract in
-`357-357-system.md` for the SSH pattern.
+Heavier runs belong in a test VM, not on a machine that holds data.
 
 ## Output layout
 
@@ -107,4 +106,4 @@ tests/qos-stress/
 
 - No pool creation (the harness expects `testqos` or `testpool` already imported).
 - No ZFS source modification — this is test infrastructure only.
-- No automated regression scoring — the Observer agent 357-557 scores reports.
+- No automated regression scoring: the reports are read by a person.

@@ -87,6 +87,14 @@ struct dmu_tx {
 	/* QoS: DMU-level bandwidth throttle triggered */
 	boolean_t tx_qos_throttled;
 	uint64_t tx_qos_consumed_bytes; /* bytes consumed for refund on abort */
+	/*
+	 * QoS: what tells a plain data write from any other transaction.
+	 * tx_qos_data_bytes is the data held by dmu_tx_hold_write*() and
+	 * dmu_tx_hold_append*(); tx_qos_dnode_bytes is the DNODE_MIN_SIZE
+	 * reserved for every held dnode.  See dmu_tx_try_assign().
+	 */
+	uint64_t tx_qos_data_bytes;
+	uint64_t tx_qos_dnode_bytes;
 
 	int tx_err;
 };

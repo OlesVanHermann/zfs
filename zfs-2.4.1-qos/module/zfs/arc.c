@@ -295,7 +295,6 @@
 #include <sys/vdev.h>
 #include <sys/vdev_impl.h>
 #include <sys/dsl_pool.h>
-#include <sys/dsl_dataset.h>
 #include <sys/multilist.h>
 #include <sys/abd.h>
 #include <sys/dbuf.h>
@@ -313,20 +312,6 @@
 #include <sys/vdev_trim.h>
 #include <sys/zfs_racct.h>
 #include <sys/zstd/zstd.h>
-
-/*
- * QoS AZ-patch52: the per-dataset ARC accounting (hdr->b_dataset +
- * ds_arc_bytes, tagged with "arc_qos_ds_hold" long holds) has been
- * REMOVED.  A dsl_dataset_long_hold() does not pin the dsl_dataset_t
- * memory (only the bonus-dbuf hold does), so tagged headers kept raw
- * pointers to datasets that dsl_dataset_evict_async() could kmem_free
- * at any time; every later ARC access then executed
- * atomic_add_64(&freed_ds->ds_arc_bytes, lsize) — reproducible SLUB
- * corruption under the S3/CIFS suites (poison overwritten at the
- * ds_arc_bytes offset, +4096/+131072 single-field increments).
- * ds_arc_bytes had no consumer anywhere in the tree, so the whole
- * mechanism is deleted rather than re-plumbed with real holds.
- */
 
 #ifndef _KERNEL
 /* set with ZFS_DEBUG=watch, to enable watchpoints on frozen buffers */
@@ -3794,8 +3779,6 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, uint64_t *real_evicted)
 	ASSERT0P(hdr->b_l1hdr.b_buf);
 	ASSERT0(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt));
 
-	/* QoS AZ-patch52: per-dataset ARC accounting removed (see top). */
-
 	*real_evicted = 0;
 	state = hdr->b_l1hdr.b_state;
 	if (GHOST_STATE(state)) {
@@ -5410,7 +5393,6 @@ arc_access(arc_buf_hdr_t *hdr, arc_flags_t arc_flags, boolean_t hit)
 			DTRACE_PROBE1(new_state__mru, arc_buf_hdr_t *, hdr);
 		}
 		arc_change_state(new_state, hdr);
-		/* QoS AZ-patch52: per-dataset ARC accounting removed. */
 	} else if (hdr->b_l1hdr.b_state == arc_mru) {
 		/*
 		 * This buffer has been accessed once recently and either
@@ -6135,23 +6117,6 @@ top:
 			arc_buf_hdr_t *exists = NULL;
 			hdr = arc_hdr_alloc(guid, psize, lsize,
 			    BP_IS_PROTECTED(bp), BP_GET_COMPRESS(bp), 0, type);
-
-			/*
-			 * QoS AZ-patch52: the per-dataset ARC tagging that
-			 * lived here (dsl_dataset_hold_obj on every ARC
-			 * miss, long_hold + hdr->b_dataset raw pointer) has
-			 * been removed.  Beyond the use-after-free described
-			 * at the top of this file, the hook itself was the
-			 * churn generator: it LOADED not-in-memory datasets
-			 * from the ZIO read-interrupt path (z_rd_int →
-			 * arc_read → dsl_dataset_hold_obj → dsl_dir_hold_obj
-			 * → zap_value_search), and the transient
-			 * dsl_dataset_t incarnations it created were evicted
-			 * seconds later with the ARC tags still pointing at
-			 * them (AZ52 canary: dozens of "UAF-WINDOW ...
-			 * longholds>0 arc_bytes>0" evictions per second
-			 * under CIFS load).
-			 */
 
 			if (!embedded_bp) {
 				hdr->b_dva = *BP_IDENTITY(bp);

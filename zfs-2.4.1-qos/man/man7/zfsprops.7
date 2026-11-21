@@ -2293,63 +2293,158 @@ Property values are limited to 8192 bytes.
 .Ss QoS User Properties
 The following user properties are recognized by the QoS (Quality of Service)
 I/O rate limiting subsystem.
-They control per-dataset I/O throttling via a dual token bucket
-(IOPS and bandwidth).
-These properties are inherited by child datasets.
-Setting a rate to
+They limit the I/O of a file system or of a volume with two token buckets,
+one for reads and one for writes, each with a bandwidth and an operation rate.
+Snapshots are never limited.
+.Pp
+A dataset is limited when at least one of its four rates is greater than zero
+and
+.Sy qos:enabled
+is not
+.Sy off .
+.Pp
+Values are decimal integers.
+A unit suffix is not understood: only the leading digits are read, so
+.Sy 100M
+means 100 and not 100 megabytes.
+A rate of
 .Sy 0
-disables QoS limiting for that dataset.
-.Bl -tag -width "qos:max_iops_write"
-.It Sy qos:max_iops_read
-Maximum read I/O operations per second (integer).
-Each read I/O consumes one IOPS token regardless of size.
-.It Sy qos:max_iops_write
-Maximum write I/O operations per second (integer).
-Each write I/O consumes one IOPS token regardless of size.
-.It Sy qos:max_bw_read
-Maximum read I/O bandwidth in bytes per second (integer).
-Each read I/O consumes tokens equal to its size in bytes.
-.It Sy qos:max_bw_write
-Maximum write I/O bandwidth in bytes per second (integer).
-Each write I/O consumes tokens equal to its size in bytes.
+means no limit for that direction, and a rate above 2^50 is treated as 2^50.
+.Pp
+Every dataset has its own buckets.
+A dataset that inherits a rate from its parent is limited on its own, to the
+same value: a parent and its children do not share one limit.
+The properties are read when a dataset is loaded
+.Pq pool import, creation, mount
+and each time one of them is set or inherited on that dataset.
+A change made on a parent does not reach the children that are already
+mounted: they keep the values they had until they are mounted again.
+.Pp
+A bucket holds at most two seconds of its rate.
+A request larger than that is admitted as soon as the bucket is not in debt
+and is charged in full: the requests that follow wait until the debt is repaid,
+so the long-run rate is the configured one.
+A throttled write waits until tokens are available, without time limit.
+A throttled read waits at most
+.Sy zfs_qos_read_timeout_ms .
+.Pp
+What is charged:
+.Bl -bullet -compact
+.It
+reads of file and volume data, for the number of bytes requested, whether the
+data is in the cache or not;
+.It
+writes, when the transaction that carries them is assigned.
+A write of file or volume data is charged for the size of that data.
+Operations that change metadata, such as creating, renaming or removing a
+file, are charged for the space their transaction reserves, 257 to 387 KiB
+each, whatever they write;
+.It
+one operation for each read request, for each write transaction and for each
+synchronous commit
+.Pq Xr fsync 2 .
+.El
+.Bl -tag -width "qos:count_arc_hits"
+.It Sy qos:enabled
+.Sy on
+or
+.Sy off .
+A dataset that has a rate and no value for this property is limited.
+With
+.Sy off
+it is not limited, whatever its rates.
+.It Sy qos:max_bw_read , Sy qos:max_bw_write
+Maximum read and write bandwidth, in bytes per second.
+.It Sy qos:max_iops_read , Sy qos:max_iops_write
+Maximum number of read and write operations per second.
+.It Sy qos:boost
+Boost factor, an integer;
+.Sy 0 ,
+the default, means no boost.
+A dataset with a boost factor of N may use, on top of its own rate, tokens
+that the other limited datasets of the pool leave unused, at up to N times its
+own rate.
+Unused read tokens boost reads and unused write tokens boost writes.
+A dataset that is the only limited one of its pool gains little: only what it
+left unused itself during the last seconds.
+.It Sy qos:boost_pool
+.Sy 1 ,
+the default, or
+.Sy 0 .
+With
+.Sy 0
+the dataset does not lend its unused tokens to the others.
+.It Sy qos:count_arc_hits
+.Sy on ,
+the default, or
+.Sy off .
+With
+.Sy off
+the reads of the dataset are not limited at all.
 .It Sy qos:max_iosize
-Maximum allowed I/O size in bytes (integer).
-I/Os larger than this value are rejected with
-.Er EIO .
-Set to
-.Sy 0
-for no limit.
+A size in bytes;
+.Sy 0 ,
+the default, means none.
+Requests larger than this size are counted in the
+.Sy stat_rejected_size
+statistic of the dataset.
+They are neither refused nor charged: they escape the limits of the dataset.
+Leave this property unset on a dataset that must be limited.
 .El
 .Pp
 Example:
 .Bd -literal -offset indent
-zfs set qos:max_bw_read=104857600 tank/client-001     # 100 MB/s read
-zfs set qos:max_bw_write=52428800 tank/client-001     # 50 MB/s write
+zfs set qos:max_bw_read=104857600 tank/client-001     # 100 MiB/s read
+zfs set qos:max_bw_write=52428800 tank/client-001     # 50 MiB/s write
 zfs set qos:max_iops_read=5000 tank/client-001
 zfs set qos:max_iops_write=3000 tank/client-001
-zfs set qos:max_iosize=131072 tank/client-001          # 128K
-zfs set qos:max_bw_read=0 tank/client-001              # disable read limit
-zfs inherit qos:max_bw_read tank/client-001            # inherit from parent
+zfs set qos:max_bw_read=0 tank/client-001              # no read limit
+zfs set qos:enabled=off tank/client-001                # suspend the limits
+zfs inherit qos:max_bw_read tank/client-001            # value of the parent
 .Ed
+.Pp
+Do not limit the dataset that holds the operating system: a throttled read
+there delays every program that is started.
+.Pp
+A limited dataset exports its settings and counters as a kstat named
+.Sy qos-0x Ns Ar id ,
+where
+.Ar id
+is the
+.Sy objsetid
+of the dataset in hexadecimal:
+.Pa /proc/spl/kstat/zfs/ Ns Ar pool Ns Pa /qos-0x Ns Ar id
+on Linux,
+.Sy kstat.zfs. Ns Ar pool Ns Sy .qos.qos-0x Ns Ar id
+on
+.Fx .
 .Ss QoS Module Parameters
-The following module parameters control system-wide QoS behavior and can
-be read and modified at runtime via
-.Pa /sys/module/zfs/parameters/ :
+The following module parameters control system-wide QoS behavior.
+They can be read and modified at runtime, under
+.Pa /sys/module/zfs/parameters/
+on Linux and as
+.Sy vfs.zfs. Ns Ar name
+without the
+.Sy zfs_
+prefix on
+.Fx .
 .Bl -tag -width "zfs_qos_read_timeout_ms"
 .It Sy zfs_qos_read_timeout_ms
-Maximum time in milliseconds a throttled read I/O will wait for tokens
-before returning
-.Er EIO
-(default:
-.Sy 10000 ,
-effective floor:
-.Sy 100 ) .
+Maximum time in milliseconds a throttled read, or a throttled synchronous
+commit, waits for tokens
+.Pq default: Sy 10000 ; No values below 100 are treated as Sy 100 .
+When the time is over the request proceeds without being charged: under heavy
+contention the limit of a dataset can therefore be exceeded.
 For NFS soft-mount clients, set this value below the client
 .Sy timeo
-parameter so ZFS abandons the wait before the NFS client issues its own
-.Er EIO .
+parameter.
 .Bd -literal -offset indent
 # Align with NFS timeo=80 (8 s)
 echo 7000 | sudo tee /sys/module/zfs/parameters/zfs_qos_read_timeout_ms
 .Ed
+.It Sy zfs_qos_debug
+Set to
+.Sy 1
+to maintain additional diagnostic counters and messages
+.Pq default: Sy 0 .
 .El

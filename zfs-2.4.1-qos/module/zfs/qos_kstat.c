@@ -20,7 +20,7 @@
  */
 
 /*
- * QoS kstat exporter — per-dataset I/O rate limiting metrics.
+ * QoS kstat exporter - per-dataset I/O rate limiting metrics.
  *
  * Exposes 28 kstat_named_t fields per QoS-enabled dataset under
  * /proc/spl/kstat/zfs/<pool>/qos-0x<objid>.
@@ -35,18 +35,18 @@
 #include <sys/zfs_context.h>
 
 /*
- * kstat values — 28 named fields: per-direction config, stats, tokens, boost
+ * kstat values - 28 named fields: per-direction config, stats, tokens, boost
  * (Q-patch10 R/W split).
  */
 typedef struct qos_kstat_values {
-	/* Configuration — per direction */
+	/* Configuration - per direction */
 	kstat_named_t	qkv_config_iops_rate_read;
 	kstat_named_t	qkv_config_iops_rate_write;
 	kstat_named_t	qkv_config_bw_rate_read;
 	kstat_named_t	qkv_config_bw_rate_write;
-	/* Configuration — shared */
+	/* Configuration - shared */
 	kstat_named_t	qkv_config_io_size_max;
-	/* Cumulative stats — per direction */
+	/* Cumulative stats - per direction */
 	kstat_named_t	qkv_stat_total_ios_read;
 	kstat_named_t	qkv_stat_total_ios_write;
 	kstat_named_t	qkv_stat_total_bytes_read;
@@ -57,18 +57,18 @@ typedef struct qos_kstat_values {
 	kstat_named_t	qkv_stat_throttle_ns_write;
 	/* Shared stats */
 	kstat_named_t	qkv_stat_rejected_size;
-	/* Instantaneous rates — per direction */
+	/* Instantaneous rates - per direction */
 	kstat_named_t	qkv_stat_current_iops_read;
 	kstat_named_t	qkv_stat_current_iops_write;
 	kstat_named_t	qkv_stat_current_bw_read;
 	kstat_named_t	qkv_stat_current_bw_write;
-	/* Live tokens — per direction */
+	/* Live tokens - per direction */
 	kstat_named_t	qkv_stat_iops_tokens_read;
 	kstat_named_t	qkv_stat_iops_tokens_write;
 	kstat_named_t	qkv_stat_bw_tokens_read;
 	kstat_named_t	qkv_stat_bw_tokens_write;
 	kstat_named_t	qkv_stat_waiter_count;
-	/* Boost — shared + per direction */
+	/* Boost - shared + per direction */
 	kstat_named_t	qkv_boost_factor;
 	kstat_named_t	qkv_boost_bw_tokens_read;
 	kstat_named_t	qkv_boost_bw_tokens_write;
@@ -123,6 +123,38 @@ struct qos_kstat {
 	hrtime_t	qk_last_time;
 };
 
+/*
+ * BA-patch53: serialize QoS kstat sysctl registration and teardown.
+ *
+ * The kstat name "qos-0x<objid>" is derived from ds_object only, so an
+ * evict->rehold cycle of the same dataset makes two incarnations share
+ * one sysctl node.  On FreeBSD, kstat_install() surgically frees
+ * same-name leaves still owned by the old kstat's sysctl ctx with an
+ * unlocked tree walk (spl_kstat.c), while kstat_delete() ->
+ * sysctl_ctx_free() may drop the sysctl lock mid-teardown
+ * (SYSCTL_SLEEP draining oid_running).  An async taskq eviction of the
+ * old incarnation racing the new incarnation's install can therefore
+ * free oids or ctx entries out from under sysctl_ctx_free's restore
+ * pass (observed panic: sysctl_register_oid+0x45 <-
+ * sysctl_ctx_free+0x78, r13=0).  Holding this mutex across
+ * create+install and delete closes every such interleaving.  The
+ * sysctl read handlers (qos_kstat_update) take only qb_lock and never
+ * this mutex, so the oid_running drain cannot deadlock against it.
+ */
+static kmutex_t qos_kstat_global_lock;
+
+void
+qos_kstat_init(void)
+{
+	mutex_init(&qos_kstat_global_lock, NULL, MUTEX_DEFAULT, NULL);
+}
+
+void
+qos_kstat_fini(void)
+{
+	mutex_destroy(&qos_kstat_global_lock);
+}
+
 static int
 qos_kstat_update(kstat_t *ksp, int rw)
 {
@@ -152,7 +184,6 @@ qos_kstat_update(kstat_t *ksp, int rw)
 	int64_t bw_tok_r = bucket->qb_read.tb_bw_tokens;
 	int64_t iops_tok_w = bucket->qb_write.tb_iops_tokens;
 	int64_t bw_tok_w = bucket->qb_write.tb_bw_tokens;
-	uint32_t waiter_count = bucket->qb_waiter_count;
 	uint32_t boost_factor = bucket->qb_boost_factor;
 	int64_t boost_bw_r = bucket->qb_read.tb_boost_bw_tokens;
 	int64_t boost_iops_r = bucket->qb_read.tb_boost_iops_tokens;
@@ -161,7 +192,7 @@ qos_kstat_update(kstat_t *ksp, int rw)
 	mutex_exit(&bucket->qb_lock);
 
 	/*
-	 * Cumulative stats — written under qb_lock as plain increments
+	 * Cumulative stats - written under qb_lock as plain increments
 	 * (AW-patch49).  Lockless read here is safe: 64-bit aligned loads
 	 * are naturally atomic on x86_64 and arm64, only one writer runs at
 	 * a time (qb_lock), and the counters are monotonic, so a transiently
@@ -232,7 +263,8 @@ qos_kstat_update(kstat_t *ksp, int rw)
 	    iops_tok_w > 0 ? (uint64_t)iops_tok_w : 0;
 	qkv->qkv_stat_bw_tokens_write.value.ui64 =
 	    bw_tok_w > 0 ? (uint64_t)bw_tok_w : 0;
-	qkv->qkv_stat_waiter_count.value.ui64 = waiter_count;
+	/* No ZIO is queued any more: kept so the kstat layout is stable. */
+	qkv->qkv_stat_waiter_count.value.ui64 = 0;
 
 	/* Boost */
 	qkv->qkv_boost_factor.value.ui64 = boost_factor;
@@ -275,28 +307,34 @@ qos_kstat_create(dsl_dataset_t *ds)
 		return;
 	}
 
-	kstat_t *kstat = kstat_create(kstat_module_name, 0, kstat_name,
-	    "qos", KSTAT_TYPE_NAMED,
-	    sizeof (empty_qos_kstats) / sizeof (kstat_named_t),
-	    KSTAT_FLAG_VIRTUAL);
-	if (kstat == NULL)
-		return;
-
 	qos_kstat_values_t *qkv =
 	    kmem_alloc(sizeof (empty_qos_kstats), KM_SLEEP);
 	memcpy(qkv, &empty_qos_kstats, sizeof (empty_qos_kstats));
 
 	struct qos_kstat *qk =
 	    kmem_zalloc(sizeof (struct qos_kstat), KM_SLEEP);
-	qk->qk_kstat = kstat;
 	qk->qk_ds = ds;
 	qk->qk_last_time = 0;
 
+	mutex_enter(&qos_kstat_global_lock);
+	kstat_t *kstat = kstat_create(kstat_module_name, 0, kstat_name,
+	    "qos", KSTAT_TYPE_NAMED,
+	    sizeof (empty_qos_kstats) / sizeof (kstat_named_t),
+	    KSTAT_FLAG_VIRTUAL);
+	if (kstat == NULL) {
+		mutex_exit(&qos_kstat_global_lock);
+		kmem_free(qkv, sizeof (empty_qos_kstats));
+		kmem_free(qk, sizeof (struct qos_kstat));
+		return;
+	}
+
+	qk->qk_kstat = kstat;
 	kstat->ks_data = qkv;
 	kstat->ks_update = qos_kstat_update;
 	kstat->ks_private = qk;
 
 	kstat_install(kstat);
+	mutex_exit(&qos_kstat_global_lock);
 	ds->ds_qos_kstat = qk;
 }
 
@@ -309,7 +347,11 @@ qos_kstat_destroy(dsl_dataset_t *ds)
 		return;
 
 	qos_kstat_values_t *qkv = qk->qk_kstat->ks_data;
+
+	mutex_enter(&qos_kstat_global_lock);
 	kstat_delete(qk->qk_kstat);
+	mutex_exit(&qos_kstat_global_lock);
+
 	qk->qk_kstat = NULL;
 	ds->ds_qos_kstat = NULL;
 

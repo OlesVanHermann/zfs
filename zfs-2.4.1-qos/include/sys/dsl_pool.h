@@ -117,8 +117,13 @@ typedef struct dsl_pool {
 	kcondvar_t dp_spaceavail_cv;
 	uint64_t dp_dirty_pertxg[TXG_SIZE];
 	uint64_t dp_dirty_total;
-	/* QoS: sum of qb_bw_rate for all QoS-enabled datasets */
+	/*
+	 * QoS: sum of the write bandwidth rates of all QoS-enabled datasets
+	 * (dirty-data quota, cap of the write boost reserve), and the same
+	 * sum for the read rates (cap of the read boost reserve).  dp_lock.
+	 */
 	uint64_t dp_qos_total_bw;
+	uint64_t dp_qos_total_bw_read;
 	/*
 	 * AV-patch48: count of QoS-enabled buckets in this pool.  Read
 	 * (relaxed, no barrier) on the ARC miss hot path to skip dataset
@@ -134,9 +139,10 @@ typedef struct dsl_pool {
 	kcondvar_t	dp_qos_wake_cv;
 	kmutex_t	dp_qos_wake_lock;
 	boolean_t	dp_qos_wake_running;
-	uint64_t	dp_qos_wake_idle_cycles;   /* hysteresis (cf. patch U) */
-	int		dp_qos_wake_mode;          /* 0=idle, 1=actif */
-	hrtime_t	dp_qos_wake_last_time;     /* X-patch16 c3: per-pool cadence */
+	boolean_t	dp_qos_wake_closing;	/* pool closing: do not start */
+	uint64_t	dp_qos_wake_idle_cycles;	/* hysteresis */
+	int		dp_qos_wake_mode;	/* 0=idle, 1=active */
+	hrtime_t	dp_qos_wake_last_time;	/* per-pool cadence */
 	/* QoS Boost: persistent surplus pool (fix v3) */
 	int64_t		dp_qos_surplus_bw_read;
 	int64_t		dp_qos_surplus_bw_write;

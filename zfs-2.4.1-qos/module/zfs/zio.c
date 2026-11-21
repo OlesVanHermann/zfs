@@ -53,7 +53,6 @@
 #include <sys/trace_zfs.h>
 #include <sys/abd.h>
 #include <sys/dsl_crypt.h>
-/* qos_bucket.h removed — ZIO gate eliminated (O-patch09-qos-unify) */
 #include <cityhash.h>
 
 /*
@@ -174,7 +173,7 @@ static kstat_t *zio_ksp;
 
 static inline void __zio_execute(zio_t *zio);
 
-void zio_taskq_dispatch(zio_t *, zio_taskq_type_t, boolean_t);
+static void zio_taskq_dispatch(zio_t *, zio_taskq_type_t, boolean_t);
 
 static int
 zio_kstats_update(kstat_t *ksp, int rw)
@@ -1021,7 +1020,6 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 	zio->io_orig_pipeline = zio->io_pipeline = pipeline;
 	zio->io_pipeline_trace = ZIO_STAGE_OPEN;
 	zio->io_allocator = ZIO_ALLOCATOR_NONE;
-	zio->io_dataset = NULL;
 
 	zio->io_state[ZIO_WAIT_READY] = (stage >= ZIO_STAGE_READY) ||
 	    (pipeline & ZIO_STAGE_READY) == 0;
@@ -1036,9 +1034,6 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 			zio->io_logical = pio->io_logical;
 		if (zio->io_child_type == ZIO_CHILD_GANG)
 			zio->io_gang_leader = pio->io_gang_leader;
-		/* Propagate QoS dataset tag to child ZIOs (gang, DDT, vdev). */
-		if (pio->io_dataset != NULL)
-			zio->io_dataset = pio->io_dataset;
 		zio_add_child_first(pio, zio);
 	}
 
@@ -2154,7 +2149,7 @@ zio_free_bp_init(zio_t *zio)
  * ==========================================================================
  */
 
-void
+static void
 zio_taskq_dispatch(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline)
 {
 	spa_t *spa = zio->io_spa;
@@ -2401,17 +2396,6 @@ zio_execute(void *zio)
 }
 
 /*
- * Dispatch a ZIO to the issue taskq for asynchronous execution.
- * Used by the QoS wake thread to avoid holding locks during
- * ZIO pipeline execution.
- */
-void
-zio_async_dispatch(zio_t *zio)
-{
-	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_FALSE);
-}
-
-/*
  * Used to determine if in the current context the stack is sized large
  * enough to allow zio_execute() to be called recursively.  A minimum
  * stack size of 16K is required to avoid needing to re-dispatch the zio.
@@ -2443,15 +2427,6 @@ static inline void
 __zio_execute(zio_t *zio)
 {
 	ASSERT3U(zio->io_queued_timestamp, >, 0);
-
-	/*
-	 * Set io_executor early so that zio_wait() sees it is non-NULL
-	 * and blocks until we clear it in zio_done().  Without this,
-	 * a QoS-throttled ZIO would leave io_executor == NULL, causing
-	 * zio_wait() to return before the ZIO completes — a
-	 * use-after-free when the caller frees the ZIO's data buffer.
-	 */
-	zio->io_executor = curthread;
 
 	while (zio->io_stage < ZIO_STAGE_DONE) {
 		enum zio_stage pipeline = zio->io_pipeline;

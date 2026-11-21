@@ -1174,7 +1174,7 @@ dmu_read_impl(dnode_t *dn, uint64_t offset, uint64_t size,
 	 * QoS: per-dataset DMU-level bandwidth throttle for reads.
 	 * Mirrors the write chokepoint in dmu_tx_assign().
 	 * Exclusions: snapshots, metadata dnodes, disabled buckets,
-	 * prefetch reads (never counted — data counted via ARC hit).
+	 * prefetch reads (never counted - data counted via ARC hit).
 	 */
 	if (size > 0 && !(flags & DMU_READ_PREFETCH)) {
 		objset_t *os = dn->dn_objset;
@@ -2092,9 +2092,6 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
 	 */
 	zp->zp_nopwrite = B_FALSE;
 
-	if (os->os_dsl_dataset != NULL)
-		pio->io_dataset = os->os_dsl_dataset;
-
 	zio_nowait(zio_write(pio, os->os_spa, dmu_tx_get_txg(tx), zgd->zgd_bp,
 	    abd_get_from_buf(zgd->zgd_db->db_data, zgd->zgd_db->db_size),
 	    zgd->zgd_db->db_size, zgd->zgd_db->db_size, zp,
@@ -2263,13 +2260,6 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	dsa->dsa_done = done;
 	dsa->dsa_zgd = zgd;
 	dsa->dsa_tx = NULL;
-
-	/*
-	 * ds is guaranteed non-NULL: SET_BOOKMARK() at the top of this
-	 * function already dereferences ds->ds_object.
-	 */
-	ASSERT(ds != NULL);
-	pio->io_dataset = ds;
 
 	zio_nowait(arc_write(pio, os->os_spa, txg, zgd->zgd_bp,
 	    dr->dt.dl.dr_data, !DBUF_IS_CACHEABLE(db),

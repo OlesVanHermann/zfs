@@ -47,8 +47,6 @@
 extern "C" {
 #endif
 
-struct dsl_dataset;
-
 /*
  * Embedded checksum
  */
@@ -487,13 +485,6 @@ struct zio {
 	uint8_t		io_state[ZIO_WAIT_TYPES];
 	uint64_t	io_txg;
 	spa_t		*io_spa;
-	/*
-	 * QoS: dataset owning this I/O. Write-once before zio_nowait().
-	 * NULL for internal I/Os (scrub, resilver, free). Lifetime:
-	 * the dataset is held open for the duration of the I/O, either
-	 * by the objset (dmu_sync) or by the calling thread (dmu_send).
-	 */
-	struct dsl_dataset *io_dataset;
 	blkptr_t	*io_bp;
 	blkptr_t	*io_bp_override;
 	blkptr_t	io_bp_copy;
@@ -556,7 +547,6 @@ struct zio {
 	void		*io_executor;
 	void		*io_waiter;
 	void		*io_bio;
-	struct qos_waiter *io_qos_waiter;  /* QoS: non-NULL if queued in wait queue */
 	kmutex_t	io_lock;
 	kcondvar_t	io_cv;
 	int		io_allocator;
@@ -643,7 +633,6 @@ extern size_t zio_get_compression_max_size(enum zio_compress compress,
 extern int zio_wait(zio_t *zio);
 extern void zio_nowait(zio_t *zio);
 extern void zio_execute(void *zio);
-extern void zio_async_dispatch(zio_t *zio);
 extern void zio_interrupt(void *zio);
 extern void zio_delay_init(zio_t *zio);
 extern void zio_delay_interrupt(zio_t *zio);

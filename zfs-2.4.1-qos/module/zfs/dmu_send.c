@@ -1657,15 +1657,11 @@ issue_data_read(struct send_reader_thread_arg *srta, struct send_range *range)
 	 * data that is not likely to be used in the future.
 	 */
 	if (arc_err != 0) {
-		zio_t *zio;
 		srdp->abd = abd_alloc_linear(srdp->datasz, B_FALSE);
 		srdp->io_outstanding = B_TRUE;
-		zio = zio_read(NULL, os->os_spa, bp, srdp->abd,
+		zio_nowait(zio_read(NULL, os->os_spa, bp, srdp->abd,
 		    srdp->datasz, dmu_send_read_done, range,
-		    ZIO_PRIORITY_ASYNC_READ, zioflags, &zb);
-		if (os->os_dsl_dataset != NULL)
-			zio->io_dataset = os->os_dsl_dataset;
-		zio_nowait(zio);
+		    ZIO_PRIORITY_ASYNC_READ, zioflags, &zb));
 	}
 }
 

@@ -4029,22 +4029,20 @@ zil_commit_flags(zilog_t *zilog, uint64_t foid, zil_commit_flag_t flags)
 	 * QoS gate for sync writes: consume one IOPS token from the
 	 * per-dataset token bucket.  Block the calling thread (typically
 	 * an NFS server thread) until tokens are available, which delays
-	 * the fsync(2) ACK to the client — the intended throttling effect.
+	 * the fsync(2) ACK to the client - the intended throttling effect.
 	 *
-	 * We pass io_size=0 (IOPS-only): the data write ZIO already
-	 * consumed bandwidth tokens in __zio_execute() (PATCH #1),
-	 * so counting BW here would double-charge the dataset.
+	 * We pass io_size=0 (IOPS-only): the bytes were already charged
+	 * when the write transaction was assigned (dmu_tx_try_assign), so
+	 * counting bandwidth here would charge the dataset twice.
 	 */
 	{
 		dsl_dataset_t *ds = dmu_objset_ds(zilog->zl_os);
 		if (ds != NULL && ds->ds_qos.qb_enabled) {
 			/*
-			 * W-patch15: cv_timedwait in place of delay() busy-loop.
-			 * qos_bucket_wait_consume() runs the S-patch11 fast-path
-			 * internally, honours the V-patch14 timeout and, on
-			 * timeout, returns so the fsync ACK proceeds (best-effort
-			 * throttle).  io_size=0 -> IOPS-only, so T-patch12's
-			 * VERIFY3U(0 <= SPA_MAXBLOCKSIZE) is trivially satisfied.
+			 * qos_bucket_wait_consume() waits on a condition
+			 * variable, honours zfs_qos_read_timeout_ms and, on
+			 * timeout, returns so that the fsync ACK proceeds
+			 * (best-effort throttle).
 			 */
 			atomic_add_64(&qos_zil_waited_total, 1);
 			qos_bucket_wait_consume(&ds->ds_qos,

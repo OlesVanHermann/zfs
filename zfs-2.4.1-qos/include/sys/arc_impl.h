@@ -41,8 +41,6 @@
 extern "C" {
 #endif
 
-struct dsl_dataset;
-
 /*
  * Note that buffers can be in one of 6 states:
  *	ARC_anon	- anonymous (discussed below)
@@ -509,11 +507,6 @@ struct arc_buf_hdr {
 	 */
 	uint16_t		b_lsize;	/* immutable */
 	uint64_t		b_spa;		/* immutable */
-	/*
-	 * QoS AZ-patch52: b_dataset (per-dataset ARC accounting) removed —
-	 * raw dsl_dataset_t pointer outlived the dataset (long holds do not
-	 * pin the memory) and caused use-after-free writes.
-	 */
 
 	/* L2ARC fields. Undefined when not in L2ARC. */
 	l2arc_buf_hdr_t		b_l2hdr;
