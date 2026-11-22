@@ -8,7 +8,7 @@ ISCSI_DS=("" "testqos/iscsi1" "testqos/iscsi2" "testqos/iscsi3" "testqos/iscsi4"
 
 check_iscsi_mounts() {
     local ok=1
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         if ! mountpoint -q "${ISCSI_MNT[$i]}" 2>/dev/null; then
             log "${RED}ERR${RST} ${ISCSI_MNT[$i]} n'est pas monté"
             ok=0
@@ -26,7 +26,7 @@ seed_read_file_iscsi() { seed_read_file "$@"; }
 clean_bench_iscsi()    { clean_bench "$@"; }
 
 iscsi_reset_all() {
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         qos_unset "${ISCSI_DS[$i]}" 2>/dev/null
         clean_bench_iscsi "${ISCSI_MNT[$i]}"
     done

@@ -1,0 +1,10 @@
+Test    |RUN  |IDLE          | qos|boost|qosmax|    seq_w|   seq_r|    rand_w|   rand_r
+        |     |              |MiB/s|    %| MiB/s|     MB/s|    MB/s|      MB/s|     MB/s
+
+═══════════════════════════════════════════════════════════════
+  S1 nfs — VM=lnx — Solo nominal (bench1 cap=5, bench2 cap=10, boost=0)
+═══════════════════════════════════════════════════════════════
+S1 nfs  |b1   |b0,b2,b3,b4,b5|   5|    0|     5|    5.336|   5.327|     5.336|    5.328
+S1 nfs  |b2   |b0,b1,b3,b4,b5|  10|    0|    10|    10.49|   10.70|     10.70|    10.59
+
+═══ S1 nfs DONE — TSV : results/v2.3/zfs-2.4.1/lnx/nfs/s1_nfs.tsv ═══

@@ -8,7 +8,7 @@ NVME_DS=("" "testqos/nvme1" "testqos/nvme2" "testqos/nvme3" "testqos/nvme4" "tes
 
 check_nvme_mounts() {
     local ok=1
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         if ! mountpoint -q "${NVME_MNT[$i]}" 2>/dev/null; then
             log "${RED}ERR${RST} ${NVME_MNT[$i]} n'est pas monté"
             ok=0
@@ -25,7 +25,7 @@ seed_read_file_nvme() { seed_read_file "$@"; }
 clean_bench_nvme()    { clean_bench "$@"; }
 
 nvme_reset_all() {
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         qos_unset "${NVME_DS[$i]}" 2>/dev/null
         clean_bench_nvme "${NVME_MNT[$i]}"
     done

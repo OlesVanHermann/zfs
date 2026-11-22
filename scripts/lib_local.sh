@@ -5,9 +5,10 @@
 # Contrairement à lib_nfs.sh, fio tourne en local dans la VM sur /testqos/benchX.
 # Pas de cache client NFS, pas de réseau → baseline "pur QoS ZFS".
 
-# ─── Topologie (5 datasets ↔ 5 mountpoints VM ↔ 5 caps) ───────────────
-LOCAL_MNT=("" "/testqos/bench1" "/testqos/bench2" "/testqos/bench3" "/testqos/bench4" "/testqos/bench5")
-LOCAL_DS=("" "testqos/bench1" "testqos/bench2" "testqos/bench3" "testqos/bench4" "testqos/bench5")
+# ─── Topologie (4 datasets ↔ 4 mountpoints VM ↔ 4 caps) ───────────────
+# AT-patch42 — bench5/cap=80 retire du scope (decision operateur 2026-04-25).
+LOCAL_MNT=("" "/testqos/bench1" "/testqos/bench2" "/testqos/bench3" "/testqos/bench4")
+LOCAL_DS=("" "testqos/bench1" "testqos/bench2" "testqos/bench3" "testqos/bench4")
 # CAPS_BW, CAPS_BW_READ, CAPS_BW_WRITE hérités de lib_nfs.sh si déjà sourcé,
 # sinon on les redéfinit ici pour permettre l'usage standalone.
 if [[ -z "${CAPS_BW[*]}" ]]; then
@@ -166,7 +167,7 @@ REMOTE
 # ─── Nettoyage global ─────────────────────────────────────────────────
 local_reset_all() {
     local i
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         qos_unset "${LOCAL_DS[$i]}" 2>/dev/null
         clean_bench_local "${LOCAL_MNT[$i]}"
     done

@@ -1,0 +1,10 @@
+Test    |RUN  |IDLE          | qos|boost|qosmax|    seq_w|   seq_r|    rand_w|   rand_r
+        |     |              |MiB/s|    %| MiB/s|     MB/s|    MB/s|      MB/s|     MB/s
+
+═══════════════════════════════════════════════════════════════
+  S1 nvmeof — VM=bsd — Solo nominal (bench1 cap=5, bench2 cap=10, boost=0)
+═══════════════════════════════════════════════════════════════
+S1 nvme |b1   |b0,b2,b3,b4,b5|   5|    0|     5|    5.216|   5.150|     5.352|    5.139
+S1 nvme |b2   |b0,b1,b3,b4,b5|  10|    0|    10|    10.38|   10.43|     10.59|   10.055
+
+═══ S1 nvmeof DONE — TSV : results/v2.3/zfs-2.4.1/bsd/nvmeof/s1_nvmeof.tsv ═══

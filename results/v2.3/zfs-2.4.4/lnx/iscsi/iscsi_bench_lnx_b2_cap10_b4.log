@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/lnx/iscsi/2 (runtime=60s size=192M) ===
+  seq_write   :     53.37 MB/s  (raw: 50.9MiB/s)
+  seq_read    :     52.01 MB/s  (raw: 49.6MiB/s)
+  rand_write  :     37.12 MB/s  (raw: 35.4MiB/s)
+  rand_read   :     52.53 MB/s  (raw: 50.1MiB/s)
+  readwrite_R :     44.15 MB/s  (raw: 42.1MiB/s)
+  readwrite_W :     46.03 MB/s  (raw: 43.9MiB/s)

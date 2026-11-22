@@ -1,0 +1,52 @@
+# /etc/systemd/system/zfs-ram-slog.service
+#
+# Attaches /dev/ram0 as SLOG to pool testqos after zfs-import-cache.
+#
+# Startup semantics:
+#   1. brd is loaded via /etc/modules-load.d/brd.conf (before zfs-import).
+#   2. zfs-import-cache.service imports testqos. If the previous SLOG was a
+#      RAM device, the pool imports DEGRADED (log "missing/unavailable").
+#      zpool handles this gracefully; writes keep working via in-pool ZIL.
+#   3. This unit runs ExecStart: removes the stale log entry (if any) then
+#      adds /dev/ram0 fresh with ashift=9.
+#   4. ExecStop (invoked at shutdown) removes /dev/ram0 before reboot so
+#      the next import doesn't see a stale missing-log state.
+#
+# Why not mirror the SLOG: mirror adds resync cost, and this SLOG is ephemeral
+# by design (wiped every reboot). A missing non-mirrored log leaves the pool
+# ONLINE with a warning — acceptable for a test VM.
+
+[Unit]
+Description=Attach RAM device as ZFS SLOG for testqos
+After=zfs-import-cache.service zfs-import-scan.service
+Requires=zfs-import.target
+Before=zfs-mount.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Remove any stale RAM SLOG entry first (non-fatal if absent).
+ExecStart=/bin/bash -c '\
+  set -e; \
+  POOL=testqos; \
+  if zpool status "$POOL" | grep -qE "^\\s+ram0\\s"; then \
+    echo "ram0 already attached — skipping"; \
+    exit 0; \
+  fi; \
+  if zpool status "$POOL" | grep -qE "was/UNAVAIL|missing"; then \
+    echo "removing stale log"; \
+    zpool remove "$POOL" ram0 2>/dev/null || true; \
+  fi; \
+  zpool add -o ashift=9 "$POOL" log /dev/ram0'
+
+# Clean removal at shutdown so pool doesn't DEGRADE on next boot.
+ExecStop=/bin/bash -c '\
+  POOL=testqos; \
+  if zpool status "$POOL" 2>/dev/null | grep -qE "^\\s+ram0\\s"; then \
+    zpool remove "$POOL" ram0 || true; \
+    zpool sync "$POOL" 2>/dev/null || true; \
+  fi'
+
+[Install]
+WantedBy=zfs.target

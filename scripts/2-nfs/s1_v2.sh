@@ -17,7 +17,7 @@ check_nfs_mounts || { log "${RED}ABORT S1${RST}"; echo "0 1" > "$COUNTS_FILE"; e
 # Reset global au démarrage
 nfs_reset_all
 
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4; do
     ds=${NFS_DS[$i]}
     mnt=${NFS_MNT[$i]}
     cap=${CAPS_BW[$i]}

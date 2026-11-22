@@ -1,0 +1,8 @@
+  [seed] building incompressible 256 MiB at /mnt/lnx/nvmeof/0/seed_path
+  === MOUNT=/mnt/lnx/nvmeof/0 (runtime=60s size=192M) ===
+  seq_write   :    555.75 MB/s  (raw: 530MiB/s)
+  seq_read    :    423.63 MB/s  (raw: 404MiB/s)
+  rand_write  :     49.28 MB/s  (raw: 47.0MiB/s)
+  rand_read   :     61.34 MB/s  (raw: 58.5MiB/s)
+  readwrite_R :    387.97 MB/s  (raw: 370MiB/s)
+  readwrite_W :    386.93 MB/s  (raw: 369MiB/s)

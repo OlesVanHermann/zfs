@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/bsd/iscsi/1 (runtime=60s size=192M) ===
+  seq_write   :     5.168 MB/s  (raw: 5047KiB/s)
+  seq_read    :     5.327 MB/s  (raw: 5202KiB/s)
+  rand_write  :     5.368 MB/s  (raw: 5242KiB/s)
+  rand_read   :     5.143 MB/s  (raw: 5022KiB/s)
+  readwrite_R :     3.242 MB/s  (raw: 3166KiB/s)
+  readwrite_W :     3.364 MB/s  (raw: 3285KiB/s)

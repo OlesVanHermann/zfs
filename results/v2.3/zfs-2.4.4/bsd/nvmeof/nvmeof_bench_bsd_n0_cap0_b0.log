@@ -1,0 +1,8 @@
+  [seed] building incompressible 256 MiB at /mnt/bsd/nvmeof/0/seed_path
+  === MOUNT=/mnt/bsd/nvmeof/0 (runtime=60s size=192M) ===
+  seq_write   :    486.54 MB/s  (raw: 464MiB/s)
+  seq_read    :    945.82 MB/s  (raw: 902MiB/s)
+  rand_write  :     84.10 MB/s  (raw: 80.2MiB/s)
+  rand_read   :     58.83 MB/s  (raw: 56.1MiB/s)
+  readwrite_R :    454.04 MB/s  (raw: 433MiB/s)
+  readwrite_W :    454.04 MB/s  (raw: 433MiB/s)

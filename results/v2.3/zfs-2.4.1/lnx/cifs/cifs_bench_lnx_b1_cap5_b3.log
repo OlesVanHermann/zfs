@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/lnx/cifs/1 (runtime=60s size=192M) ===
+  seq_write   :     21.29 MB/s  (raw: 20.3MiB/s)
+  seq_read    :     21.29 MB/s  (raw: 20.3MiB/s)
+  rand_write  :     18.35 MB/s  (raw: 17.5MiB/s)
+  rand_read   :     21.29 MB/s  (raw: 20.3MiB/s)
+  readwrite_R :     20.55 MB/s  (raw: 19.6MiB/s)
+  readwrite_W :     21.29 MB/s  (raw: 20.3MiB/s)

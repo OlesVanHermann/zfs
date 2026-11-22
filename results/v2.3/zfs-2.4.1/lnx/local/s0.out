@@ -1,0 +1,9 @@
+Test    |RUN  |IDLE          | qos|boost|qosmax|    seq_w|   seq_r|    rand_w|   rand_r
+        |     |              |MiB/s|    %| MiB/s|     MB/s|    MB/s|      MB/s|     MB/s
+
+═══════════════════════════════════════════════════════════════
+  S0 local — VM=lnx — RUN=bench0 (no QoS), IDLE=bench1..5
+═══════════════════════════════════════════════════════════════
+S0 local|b0   |b1,b2,b3,b4,b5|   0|    0|   ∞|   590.35| 2536.52|    269.49|    53.06
+
+═══ S0 local DONE — TSV : results/v2.3/zfs-2.4.1/lnx/local/s0_local.tsv ═══

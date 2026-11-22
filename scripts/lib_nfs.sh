@@ -15,16 +15,17 @@ if [[ -n "$OVERRIDE_DS" ]]; then
     IFS=' ' read -ra _ds_tmp <<< "$OVERRIDE_DS"
     NFS_DS=("" "${_ds_tmp[@]}")
 else
-    NFS_DS=("" "testqos/bench1" "testqos/bench2" "testqos/bench3" "testqos/bench4" "testqos/bench5")
+    NFS_DS=("" "testqos/bench1" "testqos/bench2" "testqos/bench3" "testqos/bench4")
 fi
-CAPS_BW=(0 5 10 20 40 80)
+# AT-patch42 — bench5/cap=80 retire du scope (decision operateur 2026-04-25).
+CAPS_BW=(0 5 10 20 40)
 
 # ─── Q-patch10 R/W split — asymétrie volontaire pour prouver indépendance ──
 # bench1 : write-heavy (3/8)   | bench2 : read-heavy (8/3)   | bench3 : sym (15/15)
-# bench4 : write≫read (20/40)  | bench5 : read≫write (40/20)
-# Somme max (N=5) = 5+10+20+40+80 = 155 MB/s < 200 MB/s bande passante pool
-CAPS_BW_READ=(0   3  8 15 20 40)
-CAPS_BW_WRITE=(0  8  3 15 40 20)
+# bench4 : write≫read (20/40)
+# Somme max (N=4) = 5+10+20+40 = 75 MB/s < 200 MB/s bande passante pool
+CAPS_BW_READ=(0   3  8 15 20)
+CAPS_BW_WRITE=(0  8  3 15 40)
 
 # ─── Paramètres de mesure ──────────────────────────────────────────────
 DUR="${DUR:-60}"               # durée par mesure (s), min 60 selon spec user
@@ -35,7 +36,7 @@ TOL_CACHE="${TOL_CACHE:-40}"   # axes b, d (indirect, cache client fausse)
 # ─── Vérifs pré-run ────────────────────────────────────────────────────
 check_nfs_mounts() {
     local ok=1
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         local mnt="${NFS_MNT[$i]}"
         if ! mountpoint -q "$mnt" 2>/dev/null; then
             log "${RED}ERR${RST} $mnt n'est pas monté"
@@ -254,30 +255,57 @@ preflight_pool_bw() {
     export POOL_BW_READ POOL_BW_WRITE PREFLIGHT_FAILED
 }
 
-# ─── assert_within_adaptive : assertion proportionnelle si sum(caps) > capacité ──
-# Si sum_caps > 0.7 × pool_bw → check ratio proportionnel au lieu du cap absolu
-# assert_within_adaptive <measured> <cap> <tol> <id> <sum_caps> <pool_bw>
+# ─── assert_within_adaptive : assertion proportionnelle via aggregate observed ──
+# AQ-patch36 (2026-04-24): switch saturation signal from preflight-pool_bw
+# (single-stream solo measurement, unrepresentative for NVMe-oF where N=5 aggregate
+# can be 30× lower than solo) to OBSERVED sum_measured aggregated AFTER wait.
+#
+# Logic:
+#   saturated = sum_measured < sum_caps × SAT_RATIO         (default SAT_RATIO=0.85)
+#   if saturated → expected = (cap / sum_caps) × sum_measured  ; tol = TOL_SAT (default 35%)
+#   else        → assert_within(m, cap, tol)                  ; cap absolute
+#
+# Why 0.85 : leaves a 15% headroom band where caps are met but pool isn't fully
+# saturated. Below that, the backend cannot deliver sum_caps; per-dataset shares
+# must shrink proportionally — assert proportional floor instead of absolute cap.
+#
+# assert_within_adaptive <measured> <cap> <tol> <id> <sum_caps> <sum_measured>
+SAT_RATIO="${SAT_RATIO:-0.85}"
+TOL_SAT="${TOL_SAT:-35}"
 assert_within_adaptive() {
-    local m=$1 cap=$2 tol=$3 id=$4 sum_caps=$5 pool_bw=$6
-    # Guard: if pool_bw is zero/garbage, the proportional formula produces expected=0 → trivial PASS.
-    # Force a FAIL instead of silently accepting an unmeasurable run.
-    local bad=$(awk -v p="$pool_bw" -v c="$cap" 'BEGIN{print (p+0 <= 0 || c+0 <= 0) ? "1" : "0"}')
+    local m=$1 cap=$2 tol=$3 id=$4 sum_caps=$5 sum_measured=$6
+    # Guard: degenerate inputs.
+    local bad=$(awk -v sm="$sum_measured" -v sc="$sum_caps" -v c="$cap" \
+        'BEGIN{print (sc+0 <= 0 || c+0 <= 0 || sm+0 < 0) ? "1" : "0"}')
     if [[ "$bad" == "1" ]]; then
-        log "  ${RED}FAIL${RST} [$id] invalid pool_bw=${pool_bw} cap=${cap} — preflight missing/failed"
+        log "  ${RED}FAIL${RST} [$id] invalid inputs sum_measured=${sum_measured} sum_caps=${sum_caps} cap=${cap}"
         FAIL_COUNT=$((FAIL_COUNT+1))
         return
     fi
-    local overloaded=$(awk -v s=$sum_caps -v p=$pool_bw 'BEGIN{print (s > 0.7*p) ? "1" : "0"}')
-    if [[ "$overloaded" == "1" ]]; then
-        # Proportional check : measured should be ≥ (cap/sum_caps) × pool_bw × (1-tol/100)
-        local expected=$(awk -v c=$cap -v s=$sum_caps -v p=$pool_bw 'BEGIN{printf "%.1f", (c/s)*p}')
-        local lo=$(awk -v e=$expected -v t=$tol 'BEGIN{printf "%.2f", e*(1-t/100)}')
+    # Guard: zero-measurement = mount/transport broken, NOT throttle.
+    # Without this guard, the saturated proportional path would compute lo=0
+    # and trivially PASS a 0 MB/s measurement when sum_measured itself is 0
+    # (all 5 datasets failed) — masking real infrastructure problems.
+    local zero=$(awk -v m="$m" 'BEGIN{print (m+0 <= 0) ? "1" : "0"}')
+    if [[ "$zero" == "1" ]]; then
+        log "  ${RED}FAIL${RST} [$id] measured=${m} (zero) — mount/transport broken, not throttle"
+        FAIL_COUNT=$((FAIL_COUNT+1))
+        return
+    fi
+    # Saturation detected via OBSERVED aggregate, not preflight solo pool_bw.
+    local saturated=$(awk -v sm=$sum_measured -v sc=$sum_caps -v r=$SAT_RATIO \
+        'BEGIN{print (sm < sc * r) ? "1" : "0"}')
+    if [[ "$saturated" == "1" ]]; then
+        # Proportional : measured ≥ (cap/sum_caps) × sum_measured × (1-TOL_SAT/100)
+        local expected=$(awk -v c=$cap -v sc=$sum_caps -v sm=$sum_measured \
+            'BEGIN{printf "%.1f", (c/sc)*sm}')
+        local lo=$(awk -v e=$expected -v t=$TOL_SAT 'BEGIN{printf "%.2f", e*(1-t/100)}')
         local ok=$(awk -v m=$m -v lo=$lo 'BEGIN{print (m >= lo) ? "1" : "0"}')
         if [[ "$ok" == "1" ]]; then
-            log "  ${GRN}PASS${RST} [$id] measured=${m} ≥ ${lo} (proportional: cap=${cap}/${sum_caps} × pool=${pool_bw}, −${tol}%)"
+            log "  ${GRN}PASS${RST} [$id] measured=${m} ≥ ${lo} (proportional sat: cap=${cap}/${sum_caps} × sum_meas=${sum_measured}, −${TOL_SAT}%)"
             PASS_COUNT=$((PASS_COUNT+1))
         else
-            log "  ${RED}FAIL${RST} [$id] measured=${m} < ${lo} (proportional: cap=${cap}/${sum_caps} × pool=${pool_bw}, −${tol}%)"
+            log "  ${RED}FAIL${RST} [$id] measured=${m} < ${lo} (proportional sat: cap=${cap}/${sum_caps} × sum_meas=${sum_measured}, −${TOL_SAT}%)"
             FAIL_COUNT=$((FAIL_COUNT+1))
         fi
     else
@@ -285,10 +313,50 @@ assert_within_adaptive() {
     fi
 }
 
+# ─── assert_lower_adaptive : same saturation logic, but FLOOR-only (for S3 boost) ──
+# AQ-patch36: S3 expects measured ≥ cap (boost can legitimately raise it above cap),
+# so the non-saturated path must use assert_lower (no upper bound), not assert_within.
+# Saturated path: same proportional formula as assert_within_adaptive.
+#
+# assert_lower_adaptive <measured> <cap> <tol> <id> <sum_caps> <sum_measured>
+assert_lower_adaptive() {
+    local m=$1 cap=$2 tol=$3 id=$4 sum_caps=$5 sum_measured=$6
+    local bad=$(awk -v sm="$sum_measured" -v sc="$sum_caps" -v c="$cap" \
+        'BEGIN{print (sc+0 <= 0 || c+0 <= 0 || sm+0 < 0) ? "1" : "0"}')
+    if [[ "$bad" == "1" ]]; then
+        log "  ${RED}FAIL${RST} [$id] invalid inputs sum_measured=${sum_measured} sum_caps=${sum_caps} cap=${cap}"
+        FAIL_COUNT=$((FAIL_COUNT+1))
+        return
+    fi
+    local zero=$(awk -v m="$m" 'BEGIN{print (m+0 <= 0) ? "1" : "0"}')
+    if [[ "$zero" == "1" ]]; then
+        log "  ${RED}FAIL${RST} [$id] measured=${m} (zero) — mount/transport broken, not throttle"
+        FAIL_COUNT=$((FAIL_COUNT+1))
+        return
+    fi
+    local saturated=$(awk -v sm=$sum_measured -v sc=$sum_caps -v r=$SAT_RATIO \
+        'BEGIN{print (sm < sc * r) ? "1" : "0"}')
+    if [[ "$saturated" == "1" ]]; then
+        local expected=$(awk -v c=$cap -v sc=$sum_caps -v sm=$sum_measured \
+            'BEGIN{printf "%.1f", (c/sc)*sm}')
+        local lo=$(awk -v e=$expected -v t=$TOL_SAT 'BEGIN{printf "%.2f", e*(1-t/100)}')
+        local ok=$(awk -v m=$m -v lo=$lo 'BEGIN{print (m >= lo) ? "1" : "0"}')
+        if [[ "$ok" == "1" ]]; then
+            log "  ${GRN}PASS${RST} [$id] measured=${m} ≥ ${lo} (proportional sat: cap=${cap}/${sum_caps} × sum_meas=${sum_measured}, −${TOL_SAT}%)"
+            PASS_COUNT=$((PASS_COUNT+1))
+        else
+            log "  ${RED}FAIL${RST} [$id] measured=${m} < ${lo} (proportional sat: cap=${cap}/${sum_caps} × sum_meas=${sum_measured}, −${TOL_SAT}%)"
+            FAIL_COUNT=$((FAIL_COUNT+1))
+        fi
+    else
+        assert_lower "$m" "$cap" "$tol" "$id"
+    fi
+}
+
 # ─── Nettoyage global : reset QoS + clean files sur 5 datasets ─────────
 nfs_reset_all() {
     local i
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         qos_unset "${NFS_DS[$i]}" 2>/dev/null
         clean_bench "${NFS_MNT[$i]}"
     done

@@ -1,78 +1,73 @@
 #!/bin/bash
-# s2_local.sh — S2 local : isolation N=2..5 datasets parallèles, fio dans la VM
+# s2_local.sh — S2 LOCAL : Boost solo, 1 dataset RUN × boost ∈ {1,2,3,4}.
+# Pour bench1 (cap=5) et bench2 (cap=10), on fait varier qos:boost.
+# Plafond effectif = cap × (1 + boost) → S2 mesure la capacité du dataset
+# unique à dépasser sa cap quand ses voisins sont au repos.
+#
+# Les voisins gardent leurs limites canoniques (bench0=0, puis 5/10/20/40/80
+# MiB/s, celles de full_setup.sh) : le boost est pris sur ce que les voisins
+# limités laissent inutilisé. Sans voisin limité il n'y a rien à prêter.
+#
+# 8 lignes par VM (2 datasets × 4 niveaux boost).
+#
+# Usage :
+#   VM=lnx|bsd|both [RUNTIME=60] [SIZE=192M] [SYNC_OFF=1] bash s2_local.sh
+#
+# SYNC_OFF=1 : applique sync=disabled sur le dataset RUN pendant le test
+#   (court-circuite ZIL/SLOG pour isoler le boost token-bucket de la latence
+#   ZIL — utile pour différencier "boost délivre des tokens" de "consumer ne
+#   peut pas drainer assez vite à cause du ZIL"). Restauré après chaque test.
+
+set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib.sh"
-source "$SCRIPT_DIR/../lib_nfs.sh"
-source "$SCRIPT_DIR/../lib_local.sh"
+# shellcheck source=lib_emit.sh
+source "$SCRIPT_DIR/lib_emit.sh"
 
-COUNTS_FILE="${COUNTS_FILE:-/tmp/s2_local_counts.txt}"
+: "${VM:=both}"
+: "${RESULTS_TSV:=$OUT_DIR/s2_local.tsv}"
+export RESULTS_TSV
+mkdir -p "$(dirname "$RESULTS_TSV")"
 
-banner "S2 local — Isolation : N=2..5, caps ${CAPS_BW[*]:1}, fio VM-side"
+declare -A CAPS
+CAPS[bench1]=5
+CAPS[bench2]=10
 
-check_local_mounts || { log "${RED}ABORT S2 local${RST}"; echo "0 1" > "$COUNTS_FILE"; exit 1; }
+BOOSTS=(1 2 3 4)
 
-local_reset_all
-log "Seeding bench_r sur les 5 datasets..."
-for i in 1 2 3 4 5; do seed_read_file_local "${LOCAL_MNT[$i]}"; done
-for i in 1 2 3 4 5; do qos_set "${LOCAL_DS[$i]}" "${CAPS_BW[$i]}" 0 0 1; done
-
-run_parallel_axis_local() {
-    local N=$1 axis=$2
-    local i out
-    local -a outs=("")
-    local -a pids=()
-
-    for i in $(seq 1 $N); do
-        out="/tmp/s2l_${N}_${axis}_${i}.out"
-        outs[$i]="$out"
-        case "$axis" in
-            a) ( fio_read_local  "${LOCAL_MNT[$i]}" direct   "$DUR" )    > "$out" & ;;
-            b) ( fio_read_local  "${LOCAL_MNT[$i]}" indirect "$DUR" )    > "$out" & ;;
-            c) ( fio_write_local "${LOCAL_MNT[$i]}" direct   wc "$DUR" ) > "$out" & ;;
-            d) ( fio_write_local "${LOCAL_MNT[$i]}" indirect wd "$DUR" ) > "$out" & ;;
-            e) ( fio_axe_e_local "${LOCAL_MNT[$i]}" "$DUR" )             > "$out" & ;;
-        esac
-        pids+=("$!")
+run_one_vm() {
+  local vm="$1"
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  S2 local — VM=$vm — Boost solo (1 dataset × boost {1..4})"
+  echo "═══════════════════════════════════════════════════════════════"
+  vm_deploy_bench "$vm"
+  for bench in bench1 bench2; do
+    local cap="${CAPS[$bench]}"
+    local ds="$POOL/$bench"
+    local idle
+    idle=$(idle_set "$ds")
+    local short_run
+    short_run=$(run_label "$ds")
+    # Voisins au repos : limites canoniques, boost 0 (ce sont les prêteurs)
+    vm_qos_canonical_others "$vm" "$ds" || exit 1
+    for boost in "${BOOSTS[@]}"; do
+      local qos_max=$(( cap * (1 + boost) ))
+      local pct="+${boost}00%"
+      vm_qos_set "$vm" "$ds" "$cap" "$boost"
+      read sw sr rw rr <<<"$(vm_run_bench "$vm" "$ds" "$cap" "$boost")"
+      emit_row "S2 local" "$short_run" "$idle" "$cap" "$pct" "$qos_max" "$sw" "$sr" "$rw" "$rr"
     done
-    wait "${pids[@]}"
-
-    local sum_caps=0
-    for i in $(seq 1 $N); do sum_caps=$((sum_caps + ${CAPS_BW[$i]})); done
-    local pool_bw
-    case "$axis" in a|b) pool_bw=${POOL_BW_READ:-999} ;; c) pool_bw=${POOL_BW_WRITE:-999} ;; esac
-
-    for i in $(seq 1 $N); do
-        out="${outs[$i]}"
-        cap=${CAPS_BW[$i]}
-        if [[ "$axis" == "e" || "$axis" == "d" ]]; then
-            if [[ "$axis" == "e" ]]; then
-                line=$(cat "$out"); info_axe_e "S2L.N${N}.e.ds${i}" "$cap" "$line"
-            else
-                m=$(cat "$out"); m=${m:-0.0}
-                log "  ${YEL}INFO${RST} [S2L.N${N}.d.ds${i}] measured=${m} MB/s (cap=${cap}, indirect write — INFO only)"
-            fi
-        else
-            m=$(cat "$out"); m=${m:-0.0}
-            log "  ds${i} (cap=${cap}): ${m} MB/s"
-            local tol; case "$axis" in a|c) tol=$TOL_STRICT ;; b) tol=$TOL_CACHE ;; esac
-            assert_within_adaptive "$m" "$cap" "$tol" "S2L.N${N}.${axis}.ds${i}" "$sum_caps" "$pool_bw"
-        fi
-        rm -f "$out"
-    done
-    for i in $(seq 1 $N); do
-        $SSH "sudo rm -f ${LOCAL_MNT[$i]}/bench_wc ${LOCAL_MNT[$i]}/bench_wd" 2>/dev/null
-    done
+    # Fin : les six datasets reviennent à l'état que laisse full_setup.sh
+    vm_qos_canonical_others "$vm"
+  done
 }
 
-for N in 2 3 4 5; do
-    log ""; log "─────────── S2L N=${N} datasets actifs ───────────"
-    for axis in a b c d e; do
-        scenario "S2L.N${N}.${axis}" "N=${N} parallèle, axe=${axis}, ${DUR}s"
-        run_parallel_axis_local "$N" "$axis"
-    done
-done
+emit_header
+case "$VM" in
+  both) run_one_vm lnx; run_one_vm bsd ;;
+  lnx|bsd) run_one_vm "$VM" ;;
+  *) echo "ERROR: VM must be lnx|bsd|both (got '$VM')" >&2; exit 1 ;;
+esac
 
-local_reset_all
-log ""
-log "Suite S2 local — terminée : ${GRN}${PASS_COUNT} PASS${RST} / ${RED}${FAIL_COUNT} FAIL${RST}"
-echo "$PASS_COUNT $FAIL_COUNT" > "$COUNTS_FILE"
+echo ""
+echo "═══ S2 local DONE — TSV : $RESULTS_TSV ═══"

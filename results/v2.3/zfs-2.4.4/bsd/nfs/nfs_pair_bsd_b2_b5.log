@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/bsd/nfs/2 (runtime=60s size=192M) ===
+  seq_write   :     63.86 MB/s  (raw: 60.9MiB/s)
+  seq_read    :     63.65 MB/s  (raw: 60.7MiB/s)
+  rand_write  :     32.51 MB/s  (raw: 31.0MiB/s)
+  rand_read   :     52.85 MB/s  (raw: 50.4MiB/s)
+  readwrite_R :     30.62 MB/s  (raw: 29.2MiB/s)
+  readwrite_W :     31.77 MB/s  (raw: 30.3MiB/s)

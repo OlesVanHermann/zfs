@@ -1,93 +1,69 @@
 #!/bin/bash
-# s3_local.sh — S3 local : boost progressif, fio dans la VM
+# s3_local.sh — S3 LOCAL : Boost parallèle, bench1+bench2 actifs simultanément.
+# Boost ∈ {1, 2, 5} — même boost sur les 2 datasets RUN.
+# bench0,3,4,5 = au repos, à leurs limites canoniques (0/20/40/80 MiB/s,
+# celles de full_setup.sh) : ce sont eux qui prêtent le boost.
+#
+# 6 lignes par VM (2 datasets × 3 niveaux boost). Le bench est lancé en
+# parallèle sur bench1 et bench2 ; on attend les 2 et on émet 2 lignes par boost.
+#
+# Usage :
+#   VM=lnx|bsd|both [RUNTIME=60] [SIZE=192M] bash s3_local.sh
+
+set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib.sh"
-source "$SCRIPT_DIR/../lib_nfs.sh"
-source "$SCRIPT_DIR/../lib_local.sh"
+# shellcheck source=lib_emit.sh
+source "$SCRIPT_DIR/lib_emit.sh"
 
-COUNTS_FILE="${COUNTS_FILE:-/tmp/s3_local_counts.txt}"
+: "${VM:=both}"
+: "${RESULTS_TSV:=$OUT_DIR/s3_local.tsv}"
+export RESULTS_TSV
+mkdir -p "$(dirname "$RESULTS_TSV")"
 
-banner "S3 local — Boost : 4 boost × 5 N × 5 axes, fio VM-side"
+CAP1=5
+CAP2=10
+BOOSTS=(1 2 5)
 
-check_local_mounts || { log "${RED}ABORT S3 local${RST}"; echo "0 1" > "$COUNTS_FILE"; exit 1; }
-
-local_reset_all
-log "Seeding bench_r sur les 5 datasets..."
-for i in 1 2 3 4 5; do seed_read_file_local "${LOCAL_MNT[$i]}"; done
-
-run_parallel_axis_s3_local() {
-    local B=$1 N=$2 axis=$3
-    local i out
-    local -a outs=("")
-    local -a pids=()
-
-    for i in $(seq 1 $N); do
-        out="/tmp/s3l_${B}_${N}_${axis}_${i}.out"
-        outs[$i]="$out"
-        case "$axis" in
-            a) ( fio_read_local  "${LOCAL_MNT[$i]}" direct   "$DUR" )    > "$out" & ;;
-            b) ( fio_read_local  "${LOCAL_MNT[$i]}" indirect "$DUR" )    > "$out" & ;;
-            c) ( fio_write_local "${LOCAL_MNT[$i]}" direct   wc "$DUR" ) > "$out" & ;;
-            d) ( fio_write_local "${LOCAL_MNT[$i]}" indirect wd "$DUR" ) > "$out" & ;;
-            e) ( fio_axe_e_local "${LOCAL_MNT[$i]}" "$DUR" )             > "$out" & ;;
-        esac
-        pids+=("$!")
-    done
-    wait "${pids[@]}"
-
-    local sum_caps=0
-    for i in $(seq 1 $N); do sum_caps=$((sum_caps + ${CAPS_BW[$i]})); done
-    local pool_bw
-    case "$axis" in a|b) pool_bw=${POOL_BW_READ:-999} ;; c) pool_bw=${POOL_BW_WRITE:-999} ;; esac
-
-    for i in $(seq 1 $N); do
-        out="${outs[$i]}"
-        cap=${CAPS_BW[$i]}
-        local theory_max=$(awk -v c=$cap -v b=$B 'BEGIN{ printf "%.1f", c*(1+b) }')
-        if [[ "$axis" == "e" || "$axis" == "d" ]]; then
-            if [[ "$axis" == "e" ]]; then
-                line=$(cat "$out"); info_axe_e "S3L.B${B}.N${N}.e.ds${i}" "$cap" "$line"
-            else
-                m=$(cat "$out"); m=${m:-0.0}
-                local ratio=$(awk -v m=$m -v c=$cap 'BEGIN{ printf "%.2f", m/c }')
-                log "  ${YEL}INFO${RST} [S3L.B${B}.N${N}.d.ds${i}] measured=${m} MB/s cap=${cap} (INFO only, boost_obs=${ratio}x)"
-            fi
-        else
-            m=$(cat "$out"); m=${m:-0.0}
-            local ratio=$(awk -v m=$m -v c=$cap 'BEGIN{ printf "%.2f", m/c }')
-            log "  ds${i} cap=${cap} boost=${B} max_theory=${theory_max} : ${m} MB/s  (boost_observed=${ratio}x)"
-            local overloaded=$(awk -v s=$sum_caps -v p=$pool_bw 'BEGIN{print (s > 0.7*p) ? "1" : "0"}')
-            if [[ "$overloaded" == "1" ]]; then
-                local expected=$(awk -v c=$cap -v s=$sum_caps -v p=$pool_bw 'BEGIN{printf "%.1f", (c/s)*p}')
-                assert_lower "$m" "$expected" 25 "S3L.B${B}.N${N}.${axis}.ds${i}"
-            else
-                assert_lower "$m" "$cap" 25 "S3L.B${B}.N${N}.${axis}.ds${i}"
-            fi
-            local over=$(awk -v m=$m -v t=$theory_max 'BEGIN{ print (m > t*1.3) ? "1" : "0" }')
-            if [[ "$over" == "1" ]]; then
-                log "    ${YEL}NOTE${RST} measured=${m} > theory_max=${theory_max} × 1.3 (cap inflaté ?)"
-            fi
-        fi
-        rm -f "$out"
-    done
-    for i in $(seq 1 $N); do
-        $SSH "sudo rm -f ${LOCAL_MNT[$i]}/bench_wc ${LOCAL_MNT[$i]}/bench_wd" 2>/dev/null
-    done
+run_one_vm() {
+  local vm="$1"
+  local ds1="$POOL/bench1"
+  local ds2="$POOL/bench2"
+  local idle
+  idle=$(idle_set "$ds1" "$ds2")
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  S3 local — VM=$vm — Boost parallèle (bench1+bench2, boost {1,2,5})"
+  echo "═══════════════════════════════════════════════════════════════"
+  vm_deploy_bench "$vm"
+  vm_qos_canonical_others "$vm" "$ds1" "$ds2" || exit 1
+  for boost in "${BOOSTS[@]}"; do
+    local qmax1=$(( CAP1 * (1 + boost) ))
+    local qmax2=$(( CAP2 * (1 + boost) ))
+    local pct="+${boost}00%"
+    vm_qos_set "$vm" "$ds1" "$CAP1" "$boost"
+    vm_qos_set "$vm" "$ds2" "$CAP2" "$boost"
+    # vm_run_bench_pair lance les 2 fio en parallèle CÔTÉ VM via 1 seul SSH
+    # → retourne 2 lignes "sw sr rw rr" (ds1 puis ds2)
+    local pair_out
+    pair_out=$(vm_run_bench_pair "$vm" "$ds1" "$CAP1" "$boost" "$ds2" "$CAP2" "$boost")
+    local s1w s1r r1w r1r s2w s2r r2w r2r
+    {
+      read -r s1w s1r r1w r1r
+      read -r s2w s2r r2w r2r
+    } <<<"$pair_out"
+    emit_row "S3 local" "b1,b2" "$idle" "$CAP1" "$pct" "$qmax1" "$s1w" "$s1r" "$r1w" "$r1r"
+    emit_row "S3 local" "b1,b2" "$idle" "$CAP2" "$pct" "$qmax2" "$s2w" "$s2r" "$r2w" "$r2r"
+  done
+  # Fin : les six datasets reviennent à l'état que laisse full_setup.sh
+  vm_qos_canonical_others "$vm"
 }
 
-for B in 1 2 5 10; do
-    log ""; log "═══════════════ S3L boost=${B} ═══════════════"
-    for i in 1 2 3 4 5; do qos_set "${LOCAL_DS[$i]}" "${CAPS_BW[$i]}" 0 "$B" 1; done
-    for N in 1 2 3 4 5; do
-        log ""; log "────── S3L boost=${B} N=${N} actifs ──────"
-        for axis in a b c d e; do
-            scenario "S3L.B${B}.N${N}.${axis}" "boost=${B} N=${N} axe=${axis}, ${DUR}s"
-            run_parallel_axis_s3_local "$B" "$N" "$axis"
-        done
-    done
-done
+emit_header
+case "$VM" in
+  both) run_one_vm lnx; run_one_vm bsd ;;
+  lnx|bsd) run_one_vm "$VM" ;;
+  *) echo "ERROR: VM must be lnx|bsd|both (got '$VM')" >&2; exit 1 ;;
+esac
 
-local_reset_all
-log ""
-log "Suite S3 local — terminée : ${GRN}${PASS_COUNT} PASS${RST} / ${RED}${FAIL_COUNT} FAIL${RST}"
-echo "$PASS_COUNT $FAIL_COUNT" > "$COUNTS_FILE"
+echo ""
+echo "═══ S3 local DONE — TSV : $RESULTS_TSV ═══"

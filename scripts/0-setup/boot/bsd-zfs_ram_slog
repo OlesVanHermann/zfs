@@ -1,0 +1,90 @@
+#!/bin/sh
+#
+# /usr/local/etc/rc.d/zfs_ram_slog
+#
+# PROVIDE: zfs_ram_slog
+# REQUIRE: zfs
+# KEYWORD: shutdown
+#
+# Provisions /dev/md0 (malloc-backed) as a SLOG for a ZFS pool at boot,
+# and cleanly removes it at shutdown.
+#
+# Config (in /etc/rc.conf):
+#   zfs_ram_slog_enable="YES"
+#   zfs_ram_slog_size="1024"         # MB for md0
+#   zfs_ram_slog_pool="testqos"      # pool name
+
+. /etc/rc.subr
+
+name="zfs_ram_slog"
+rcvar="${name}_enable"
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+
+load_rc_config $name
+
+: ${zfs_ram_slog_enable:=NO}
+: ${zfs_ram_slog_size:=1024}
+: ${zfs_ram_slog_pool:=testqos}
+
+zfs_ram_slog_start() {
+    local pool="$zfs_ram_slog_pool"
+    local size="$zfs_ram_slog_size"
+
+    # Ensure md0 exists and is swap-backed
+    # NOTE: malloc-backed md(4) panics under heavy ZIL load (NVMe-oF fastpath)
+    # — the malloc indir tree gets corrupted, leading to uma_zfree on invalid
+    # zone pointer in mdstart_malloc → pmap_kextract page fault.
+    # swap-backed uses VM pages directly, no indir tree.
+    if mdconfig -l -u 0 >/dev/null 2>&1; then
+        echo "zfs_ram_slog: md0 already exists — leaving as-is"
+    else
+        echo "zfs_ram_slog: creating md0 (${size}m swap)"
+        mdconfig -a -t swap -s "${size}m" -u 0 || {
+            echo "zfs_ram_slog: mdconfig failed" >&2
+            return 1
+        }
+    fi
+
+    # Skip if already attached
+    if zpool status "$pool" 2>/dev/null | grep -qE '^[[:space:]]+md0[[:space:]]'; then
+        echo "zfs_ram_slog: md0 already in pool $pool — skipping"
+        return 0
+    fi
+
+    # Clean stale log entries (pool imported after reboot with missing md0)
+    if zpool status "$pool" 2>/dev/null | grep -qE 'was/UNAVAIL|missing'; then
+        echo "zfs_ram_slog: removing stale log entry"
+        zpool remove "$pool" md0 2>/dev/null || true
+    fi
+
+    echo "zfs_ram_slog: zpool add -o ashift=9 $pool log /dev/md0"
+    zpool add -o ashift=9 "$pool" log /dev/md0 || {
+        echo "zfs_ram_slog: zpool add failed" >&2
+        return 1
+    }
+}
+
+zfs_ram_slog_stop() {
+    local pool="$zfs_ram_slog_pool"
+
+    if zpool status "$pool" 2>/dev/null | grep -qE '^[[:space:]]+md0[[:space:]]'; then
+        echo "zfs_ram_slog: removing md0 from pool $pool"
+        zpool remove "$pool" md0 || true
+        zpool sync "$pool" 2>/dev/null || true
+    fi
+
+    if mdconfig -l -u 0 >/dev/null 2>&1; then
+        echo "zfs_ram_slog: destroying md0"
+        mdconfig -d -u 0 || true
+    fi
+}
+
+zfs_ram_slog_status() {
+    local pool="$zfs_ram_slog_pool"
+    mdconfig -l -v 2>/dev/null
+    zpool status "$pool" 2>/dev/null | grep -E 'logs|md0|state:'
+}
+
+run_rc_command "$1"

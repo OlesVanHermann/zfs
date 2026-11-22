@@ -1,0 +1,67 @@
+╔══════════════════════════════════════════════════════════════╗
+║          QoS Mount Coherence Check                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+── LOCAL ──
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench1 → testqos/bench1
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench1 → testqos/bench1
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench2 → testqos/bench2
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench2 → testqos/bench2
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench3 → testqos/bench3
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench3 → testqos/bench3
+  [32mPASS[0m [LOCAL-LNX] /testqos/bench4 → testqos/bench4
+  [32mPASS[0m [LOCAL-BSD] /testqos/bench4 → testqos/bench4
+
+── NFS ──
+  [32mPASS[0m [NFS-LNX] /mnt/lnx/nfs/1 → testqos/bench1
+  [32mPASS[0m [NFS-BSD] /mnt/bsd/nfs/1 → testqos/bench1
+  [32mPASS[0m [NFS-LNX] /mnt/lnx/nfs/2 → testqos/bench2
+  [32mPASS[0m [NFS-BSD] /mnt/bsd/nfs/2 → testqos/bench2
+  [32mPASS[0m [NFS-LNX] /mnt/lnx/nfs/3 → testqos/bench3
+  [32mPASS[0m [NFS-BSD] /mnt/bsd/nfs/3 → testqos/bench3
+  [32mPASS[0m [NFS-LNX] /mnt/lnx/nfs/4 → testqos/bench4
+  [32mPASS[0m [NFS-BSD] /mnt/bsd/nfs/4 → testqos/bench4
+
+── CIFS ──
+  [32mPASS[0m [CIFS-LNX] /mnt/lnx/cifs/1 → testqos/bench1
+  [32mPASS[0m [CIFS-BSD] /mnt/bsd/cifs/1 → testqos/bench1
+  [32mPASS[0m [CIFS-LNX] /mnt/lnx/cifs/2 → testqos/bench2
+  [32mPASS[0m [CIFS-BSD] /mnt/bsd/cifs/2 → testqos/bench2
+  [32mPASS[0m [CIFS-LNX] /mnt/lnx/cifs/3 → testqos/bench3
+  [32mPASS[0m [CIFS-BSD] /mnt/bsd/cifs/3 → testqos/bench3
+  [32mPASS[0m [CIFS-LNX] /mnt/lnx/cifs/4 → testqos/bench4
+  [32mPASS[0m [CIFS-BSD] /mnt/bsd/cifs/4 → testqos/bench4
+
+── iSCSI ──
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/1 → testqos/iscsi1
+  [32mPASS[0m [iSCSI-BSD] /mnt/bsd/iscsi/1 → testqos/iscsi1
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/2 → testqos/iscsi2
+  [32mPASS[0m [iSCSI-BSD] /mnt/bsd/iscsi/2 → testqos/iscsi2
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/3 → testqos/iscsi3
+  [32mPASS[0m [iSCSI-BSD] /mnt/bsd/iscsi/3 → testqos/iscsi3
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/4 → testqos/iscsi4
+  [32mPASS[0m [iSCSI-BSD] /mnt/bsd/iscsi/4 → testqos/iscsi4
+
+── NVMe-oF ──
+  [32mPASS[0m [NVMe-LNX] /mnt/lnx/nvmeof/1 → testqos/nvme1
+  [32mPASS[0m [NVMe-BSD] /mnt/bsd/nvmeof/1 → testqos/nvmeof1
+  [32mPASS[0m [NVMe-LNX] /mnt/lnx/nvmeof/2 → testqos/nvme2
+  [32mPASS[0m [NVMe-BSD] /mnt/bsd/nvmeof/2 → testqos/nvmeof2
+  [32mPASS[0m [NVMe-LNX] /mnt/lnx/nvmeof/3 → testqos/nvme3
+  [32mPASS[0m [NVMe-BSD] /mnt/bsd/nvmeof/3 → testqos/nvmeof3
+  [32mPASS[0m [NVMe-LNX] /mnt/lnx/nvmeof/4 → testqos/nvme4
+  [32mPASS[0m [NVMe-BSD] /mnt/bsd/nvmeof/4 → testqos/nvmeof4
+
+── iSCSI LUN order (host HCTL) ──
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/1 → /dev/sdb LUN=1
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/2 → /dev/sdc LUN=2
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/3 → /dev/sdd LUN=3
+  [32mPASS[0m [iSCSI-LNX] /mnt/lnx/iscsi/4 → /dev/sde LUN=4
+  [32mPASS[0m [iSCSI-LNX] /mnt/bsd/iscsi/1 → /dev/sdh LUN=1
+  [32mPASS[0m [iSCSI-LNX] /mnt/bsd/iscsi/2 → /dev/sdi LUN=2
+  [32mPASS[0m [iSCSI-LNX] /mnt/bsd/iscsi/3 → /dev/sdj LUN=3
+  [32mPASS[0m [iSCSI-LNX] /mnt/bsd/iscsi/4 → /dev/sdk LUN=4
+
+══════════════════════════════════════════════════════════════
+  RÉSULTAT: [32m48 PASS[0m / [31m0 FAIL[0m / [33m0 WARN[0m
+══════════════════════════════════════════════════════════════

@@ -1,0 +1,13 @@
+  === testqos/bench0 ===
+  qos:enabled        off
+  qos:max_bw_read    0 (0)
+  qos:max_bw_write   0 (0)
+  qos:boost          0
+  qos:count_arc_hits on
+  sync               standard
+  seq_write   :   7336.91 MB/s  (raw: 6997MiB/s)
+  seq_read    :   3130.01 MB/s  (raw: 2985MiB/s)
+  rand_write  :   1256.20 MB/s  (raw: 1198MiB/s)
+  rand_read   :     27.58 MB/s  (raw: 26.3MiB/s)
+  readwrite_R :   7182.77 MB/s  (raw: 6850MiB/s)
+  readwrite_W :   7172.29 MB/s  (raw: 6840MiB/s)

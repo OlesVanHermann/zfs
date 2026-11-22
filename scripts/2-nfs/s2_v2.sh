@@ -22,12 +22,12 @@ fi
 # Reset + seed read files sur les 5 datasets (QoS off)
 nfs_reset_all
 log "Seeding bench_r sur les 5 datasets..."
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4; do
     seed_read_file "${NFS_MNT[$i]}"
 done
 
 # Applique tous les caps (boost=0)
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4; do
     qos_set "${NFS_DS[$i]}" "${CAPS_BW[$i]}" 0 0 1
 done
 
@@ -56,11 +56,20 @@ run_parallel_axis() {
     # Calcul sum_caps pour les N datasets actifs
     local sum_caps=0
     for i in $(seq 1 $N); do sum_caps=$((sum_caps + ${CAPS_BW[$i]})); done
-    local pool_bw
-    case "$axis" in
-        a|b) pool_bw=${POOL_BW_READ:-999} ;;
-        c)   pool_bw=${POOL_BW_WRITE:-999} ;;
-    esac
+
+    # AQ-patch36: agrégation OBSERVÉE post-wait (axes a|b|c). Sert d'input à
+    # assert_within_adaptive — saturation = sum_measured < SAT_RATIO × sum_caps.
+    # Plus représentatif que pool_bw préflight solo (NVMe-oF: 1998 MB/s solo
+    # vs ~70 MB/s aggregate N=5).
+    local sum_measured=0
+    if [[ "$axis" == "a" || "$axis" == "b" || "$axis" == "c" ]]; then
+        for i in $(seq 1 $N); do
+            local mi
+            mi=$(cat "${outs[$i]}" 2>/dev/null)
+            mi=${mi:-0.0}
+            sum_measured=$(awk -v a=$sum_measured -v b=$mi 'BEGIN{printf "%.1f", a+b}')
+        done
+    fi
 
     # Évalue chaque dataset
     for i in $(seq 1 $N); do
@@ -84,7 +93,7 @@ run_parallel_axis() {
                 a|c) tol=$TOL_STRICT ;;
                 b)   tol=$TOL_CACHE  ;;
             esac
-            assert_within_adaptive "$m" "$cap" "$tol" "S2.N${N}.${axis}.ds${i}" "$sum_caps" "$pool_bw"
+            assert_within_adaptive "$m" "$cap" "$tol" "S2.N${N}.${axis}.ds${i}" "$sum_caps" "$sum_measured"
         fi
         rm -f "$out"
     done

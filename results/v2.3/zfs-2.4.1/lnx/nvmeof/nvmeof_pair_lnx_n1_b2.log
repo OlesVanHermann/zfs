@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/lnx/nvmeof/1 (runtime=60s size=192M) ===
+  seq_write   :     14.05 MB/s  (raw: 13.4MiB/s)
+  seq_read    :     14.05 MB/s  (raw: 13.4MiB/s)
+  rand_write  :     12.90 MB/s  (raw: 12.3MiB/s)
+  rand_read   :     15.94 MB/s  (raw: 15.2MiB/s)
+  readwrite_R :     11.43 MB/s  (raw: 10.9MiB/s)
+  readwrite_W :     12.06 MB/s  (raw: 11.5MiB/s)

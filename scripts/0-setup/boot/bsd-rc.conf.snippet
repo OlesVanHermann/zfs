@@ -1,0 +1,10 @@
+# Append to /etc/rc.conf on the FreeBSD test VM.
+# Triggers the zfs_ram_slog rc.d script at boot.
+zfs_ram_slog_enable="YES"
+
+# Size in MB for the malloc-backed md0 (ZIL log device).
+# Keep small — ZIL only needs room for in-flight sync records.
+zfs_ram_slog_size="1024"
+
+# Pool name to attach the SLOG to.
+zfs_ram_slog_pool="testqos"

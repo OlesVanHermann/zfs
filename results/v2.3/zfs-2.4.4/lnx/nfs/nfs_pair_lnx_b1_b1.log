@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/lnx/nfs/1 (runtime=60s size=192M) ===
+  seq_write   :     10.59 MB/s  (raw: 10.1MiB/s)
+  seq_read    :     10.70 MB/s  (raw: 10.2MiB/s)
+  rand_write  :     9.596 MB/s  (raw: 9371KiB/s)
+  rand_read   :     10.59 MB/s  (raw: 10.1MiB/s)
+  readwrite_R :     5.044 MB/s  (raw: 4926KiB/s)
+  readwrite_W :     5.498 MB/s  (raw: 5369KiB/s)

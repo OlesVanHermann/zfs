@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/bsd/nvmeof/1 (runtime=60s size=192M) ===
+  seq_write   :     5.334 MB/s  (raw: 5209KiB/s)
+  seq_read    :     5.346 MB/s  (raw: 5221KiB/s)
+  rand_write  :     4.844 MB/s  (raw: 4730KiB/s)
+  rand_read   :     5.311 MB/s  (raw: 5187KiB/s)
+  readwrite_R :     3.161 MB/s  (raw: 3087KiB/s)
+  readwrite_W :     3.281 MB/s  (raw: 3204KiB/s)

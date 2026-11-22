@@ -1,187 +1,106 @@
-# OpenZFS QoS — 2.4.1
+# OpenZFS QoS
 
-Système QoS per-dataset pour OpenZFS : token bucket avec caps read/write séparés,
-mécanisme de boost avec surplus pool persistant, kstats exporter.
+Qualité de service par dataset pour OpenZFS : chaque système de fichiers ou volume peut recevoir
+une limite de débit en lecture et en écriture (octets par seconde, opérations par seconde), et
+un droit d'emprunter ce que les voisins limités du même pool n'utilisent pas (« boost »).
 
-Même patch, même binaire pour **Linux** et **FreeBSD** — aucun `#ifdef` OS-specific,
-toute la portabilité est assurée par la couche SPL d'OpenZFS.
+Tout est dans le module noyau. Les limites se posent avec des propriétés utilisateur `qos:*` ;
+elles valent sous tous les chemins d'accès — local, NFS, CIFS, iSCSI, NVMe-oF — sur **Linux**
+et sur **FreeBSD**, avec le même source.
 
-## Statut
-
-- **Version** : 2.2 (sur OpenZFS 2.4.1, release upstream 2026-02-25)
-- **Validation** : campagne 2026-07-05 — voir [RESULTS.md](RESULTS.md)
-  (builds bi-OS, matrice caps 4 datasets × 5 patterns × 2 OS à RUNTIME=60 s,
-  accounting `throttle_ns` par direction, chaîne S1+S2+S3 sur 10 combinaisons
-  protocoles×OS) ; historique v2.1 : 150/150 PASS S1 (2026-04-19)
-- **Overhead qos=off** : 0 % (mesuré 2026-04-29 par swap module vanilla 2.4.1 vs 2.1 sur la même VM, NFS Δ ≤ ±10 % bruit RPC, LOCAL writes -2 % à -16 % bruit run-to-run) ; v2.2 supprime en plus tout travail résiduel quand aucun dataset n'est `qos:enabled=on`
-- **Plateformes testées** : Linux (Ubuntu 24.04, kernel 6.8) + FreeBSD (15.0-RELEASE-p5)
-
-## Nouveautés v2.2 (vs v2.1)
-
-- **Fix corruption mémoire (use-after-free ARC)** (AZ-patch52) : le comptage
-  ARC per-dataset (`hdr->b_dataset`/`ds_arc_bytes`, hérité de v1.0, sans
-  aucun lecteur) taguait les headers ARC d'un pointeur non épinglé — sous
-  churn de propriétés `qos:*` + I/O, écriture dans un `dsl_dataset_t` libéré
-  → corruption SLUB, panics sous S3/boost. Mécanisme supprimé, caps boost
-  écrits sous `qb_lock`, sentinelles de lifetime permanentes (`zfs_dbgmsg`).
-  Validé : repro muette ×2 OS, chaîne complète 15 h sans crash
-- **Fix dérive `dp_qos_total_bw`** : `qos_prop_apply()` déplacé après la
-  résolution winner/loser de `dsl_dataset_hold_obj()` (plus de gonflement du
-  total pool par course de chargement)
-- **Wake-thread par pool** (X-patch16 + AV-patch48) : le thread de réveil des
-  waiters est shardé par pool et démarré/arrêté selon le nombre de datasets
-  `qos:enabled=on` (`dp_qos_enabled_count`) — zéro travail résiduel qos=off
-- **Perf hot-path qos=on** (AW-patch49) : compteurs sous le `qb_lock` existant
-  (plus d'atomics dédiés côté Linux), 1 seul `gethrtime()` par `try_consume`,
-  aucune lecture d'horloge par retry
-- **Fix accounting `throttle_ns`** (AY-patch51) : `stat_throttle_ns_read/write`
-  comptabilisent réellement le temps d'attente sur les 3 chemins (sync
-  `wait_consume`, grant du wake-thread — direction résolue par `io_type` au
-  lieu de read codé en dur —, gate write DMU via `dmu_tx_wait`) ; validé 60 s
-  bi-OS : 91-99.8 % du wall time comptabilisé, directions strictes
-- **Suite `tests/qos-validation/`** : validation utilisateur auto-contenue
-  (crée 4 datasets cappés, matrice fio, vérifie ratios + kstats, détruit) —
-  `sudo bash tests/qos-validation/run_validation.sh <pool> 60`
-- **DESIGN.md** : architecture, points d'accrochage kernel, décisions
-  justifiées, historique complet
-
-## Nouveautés v2.1 (vs v1.0)
-
-- **Z-patch18 — write-direct fix (`qos_bucket.c`)** : path direct write (`O_DIRECT`) maintenant tracké, plus de bypass du token bucket
-- **Z-patch19 — refund-on-unassign (`dmu_tx.c`)** : `qos_bucket_refund()` appelé dans `dmu_tx_unassign()` (pas `dmu_tx_commit()`). Corrige la perte de tokens sur abort, garantit la convergence des caps en write `O_DIRECT`
-- **Suite de stress-tests `tests/qos-stress/`** : mesure locks contention + wake-thread CPU sous charge multi-dataset (création N datasets, fio parallel, rapport agrégé)
-- **Boost scaling** : v1.0 plafonnait à `~1.6 × cap` quel que soit `qos:boost` ; v2.1 scale `cap × (1 + boost)` parfaitement (cf bench LOCAL bench1/bench2 avec boost +100/+200/+300/+400 %)
-
-## Arborescence
-
-```
-~/zfs-241-qos/
-├── zfs-2.4.1/                # OpenZFS 2.4.1 upstream (source vanilla)
-├── zfs-2.4.1-qos/            # 2.4.1 + QoS (notre version modifiée)
-├── patch-2.4.1/
-│   ├── zfs-qos.patch         # Diff unifié (36 fichiers, +3675 lignes)
-│   ├── specs-patches.md      # Spécifications fonctionnelles
-│   ├── DEPENDENCIES.md       # Ordre de dépendance des patchs
-│   └── TEST-PLAN.md          # Plan de test QoS
-├── scripts/                  # Scripts de test autonomes
-│   ├── qos_env.sh            # Config centralisée
-│   ├── full_setup.sh         # Setup complet (teardown + reboot + mount)
-│   ├── verify_all.sh         # Vérification cohérence
-│   ├── chain_full.sh         # Chain autonome S1/S2/S3
-│   ├── lib.sh                # Fonctions partagées
-│   ├── 1-local/              # Suite LOCAL
-│   ├── 2-nfs/                # Suite NFS
-│   ├── 3-cifs/               # Suite CIFS
-│   ├── 4-iscsi/              # Suite iSCSI
-│   └── 5-nvmeof/             # Suite NVMe-oF
-├── output/                   # Résultats de tests
-│   └── s1_full_chain_20260419.log
-├── README.md                 # Ce fichier
-├── RESULTS.md                # Résultats de la campagne de validation v2.2
-├── USAGE.md                  # Guide d'utilisation des propriétés QoS
-└── DESIGN.md                 # Architecture, décisions de design, historique
+```sh
+zfs set qos:max_bw_write=52428800 tank/client-001     # 50 Mio/s en écriture
+zfs set qos:max_bw_read=104857600 tank/client-001     # 100 Mio/s en lecture
+zfs set qos:boost=1 tank/client-001                   # jusqu'au double si les voisins laissent de quoi
 ```
 
-## Documentation
+## Version 2.3
 
-| Document | Contenu |
-|----------|---------|
-| [RESULTS.md](RESULTS.md) | Résultats complets de la campagne de validation v2.2 |
-| [USAGE.md](USAGE.md) | Guide d'utilisation des propriétés QoS (`qos:*`) |
-| [DESIGN.md](DESIGN.md) | Architecture, points d'accrochage kernel, décisions de design justifiées, historique de construction v1.0→v2.1, stratégie de validation |
-| [patch-2.4.1/specs-patches.md](patch-2.4.1/specs-patches.md) | Spécifications fonctionnelles des 7 patches |
-| [patch-2.4.1/DEPENDENCIES.md](patch-2.4.1/DEPENDENCIES.md) | Dépendances et ordre de build |
-| [patch-2.4.1/TEST-PLAN.md](patch-2.4.1/TEST-PLAN.md) | Plan de test canonique (S1/S2/S3) |
+Version de stabilisation : pas de mécanisme nouveau, des défauts corrigés, le code mort retiré,
+la documentation réécrite d'après le code, un outillage de test dans l'arbre. Détail dans
+[RELEASE-NOTES-v2.3.md](RELEASE-NOTES-v2.3.md).
 
-## Patch — résumé
+Elle est publiée sur deux versions d'OpenZFS, sous deux formes chacune :
 
-32 fichiers (3 nouveaux QoS + 9 nouveaux qos-stress), +3372 / -4 lignes :
+| base amont | patch seul | arbre complet |
+|---|---|---|
+| OpenZFS 2.4.4 (dernière version publique, août 2026) | [`patch-2.4.4/zfs-qos.patch`](patch-2.4.4/zfs-qos.patch) | [`zfs-2.4.4-qos/`](zfs-2.4.4-qos) |
+| OpenZFS 2.4.1 | [`patch-2.4.1/zfs-qos.patch`](patch-2.4.1/zfs-qos.patch) | [`zfs-2.4.1-qos/`](zfs-2.4.1-qos) |
 
-| Fichier | Lignes | Rôle |
-|---------|-------:|------|
-| module/zfs/qos_bucket.c | +1233 | Token bucket (IOPS + BW), wake thread, boost, write-direct fix |
-| module/zfs/qos_kstat.c | +312 | Exporteur kstats per-dataset |
-| module/zfs/dsl_dataset.c | +230 | Wiring propriétés ZFS → bucket |
-| include/sys/qos_bucket.h | +154 | Header structures + API |
-| module/zfs/dmu_tx.c | +102 | Throttle DMU tx (back-pressure) + refund-on-unassign (Z-patch19) |
-| module/zfs/dsl_pool.c | +100 | Pool-level init/fini, surplus pool |
-| man/man7/zfsprops.7 | +63 | Documentation man page |
-| module/zfs/dmu.c | +54 | Throttle DMU read |
-| module/zfs/arc.c | +53 | ARC partitioning per-dataset |
-| module/zfs/zio.c | +29 | Propagation du tag QoS aux ZIOs enfants (gate `zio_ready` d'origine retirée — O-patch09, voir DESIGN.md §3) |
-| module/zfs/zil.c | +29 | Rate-limit ZIL commits (sync writes) |
-| include/sys/dsl_pool.h | +19 | Structures pool QoS |
-| include/sys/dsl_dataset.h | +15 | Structures dataset QoS |
-| include/sys/zio.h | +11 | Flags QoS dans zio_t |
-| (autres) | +30 | Build system, helpers |
-| **tests/qos-stress/** | **+940** | Suite stress test : create_datasets, run_load, measure_locks, measure_wake_cpu, report |
+Le code QoS est le même sur les deux bases ; les deux patchs ne diffèrent que par la position
+des insertions dans les fichiers de l'amont. Pour chaque base, « tag amont + patch » redonne
+exactement l'arbre complet (`tools/make_patch.sh` le prouve).
 
-## Application du patch
+Le patch : 78 fichiers, dont 18 hors `tests/` (+2 875 lignes de code et de documentation) ;
+trois fichiers nouveaux portent le mécanisme (`module/zfs/qos_bucket.c`, `module/zfs/qos_kstat.c`,
+`include/sys/qos_bucket.h`), le reste sont des points d'accrochage dans la couche DMU.
+`zio.c`, `arc.c`, `dmu_direct.c` et `dmu_send.c` sont identiques à l'amont.
 
-```bash
-# Sur un checkout OpenZFS 2.4.1 propre
-cd zfs-2.4.1
-patch -p1 < ../patch-2.4.1/zfs-qos.patch
-./autogen.sh && ./configure && make -j$(nproc)
+## Par où commencer
+
+| vous voulez… | lisez |
+|---|---|
+| installer le module | [INSTALL.md](INSTALL.md) |
+| poser des limites, comprendre ce qui est compté | [USAGE.md](USAGE.md) |
+| savoir ce qui a été corrigé et ce qui reste | [RELEASE-NOTES-v2.3.md](RELEASE-NOTES-v2.3.md) |
+| voir les mesures | [RESULTS.md](RESULTS.md) |
+| savoir comment c'est testé, rejouer les tests | [TESTING.md](TESTING.md) |
+| comprendre le code | [DESIGN.md](DESIGN.md) |
+
+## Ce que contient le dépôt
+
+```
+zfs-2.4.4-qos/        OpenZFS 2.4.4 + QoS, arbre complet
+zfs-2.4.1-qos/        OpenZFS 2.4.1 + QoS, arbre complet
+patch-2.4.4/          le patch seul pour OpenZFS 2.4.4
+patch-2.4.1/          le patch seul pour OpenZFS 2.4.1 ; trois documents de conception de la v1.0
+                      y sont conservés pour l'historique, ils ne décrivent pas la v2.3
+scripts/              le banc : préparation, vérification, scénarios S0 à S3 des cinq protocoles
+tools/                fabrication et preuve du patch, enchaînement de la campagne, tableaux
+results/v2.3/         sorties brutes de la campagne, par base, par système, par protocole
+output/               journal de la campagne v2.1 (avril 2026), conservé
 ```
 
-Ou copier directement `zfs-2.4.1-qos/`.
+Dans chaque arbre, `tests/qos-gates/` contient la construction contrôlée, l'installation
+contrôlée et les portes de test ; `man/man7/zfsprops.7` documente les propriétés `qos:*`.
 
-## Build
+`scripts/zfs-images` est le pointeur de sous-module de l'amont (images de test) : il n'est pas
+nécessaire pour construire.
 
-### Linux
+## Résultats en bref
 
-```bash
-cd zfs-2.4.1-qos
-./autogen.sh && ./configure && make -j$(nproc)
-sudo make install && sudo depmod -a
-# Reboot requis
-```
+Campagne des 21 et 22 novembre 2026 : deux bases, Linux et FreeBSD, cinq protocoles (local, NFS,
+CIFS, iSCSI, NVMe-oF), 332 lignes de tableau, chaque mesure de 60 secondes à un seul fil en
+accès direct. Détail et tableaux dans [RESULTS.md](RESULTS.md).
 
-### FreeBSD
+- **Aucune limite n'est dépassée** : sur 1 280 cellules sous limite, la plus haute est à
+  1,03 fois son plafond (l'effet attendu du seau plein au départ).
+- **Limite seule** : 152 cellules sur 160 entre 0,97 et 1,03 fois la limite, écriture de 4 Kio
+  comprise ; les huit autres entre 0,91 et 0,97.
+- **Boost, de +100 % à +500 %** : en écriture et en lecture séquentielles, le plafond
+  limite × (1 + boost) est tenu dans 511 cellules sur 560. Les 49 autres sont entre 0,78 et
+  0,97 du plafond. Là où la sortie de `fio` a été gardée, ce sont presque toujours des
+  requêtes bloquées d'une à cinq secondes : des arrêts épisodiques, plus fréquents sous
+  FreeBSD et sur les volumes (limite connue).
+- **Écriture aléatoire boostée** : au plafond tant qu'il reste modeste, en dessous quand il
+  monte (limite connue de la « part de données en attente »).
+- **Les deux bases se comportent de la même façon.**
 
-```bash
-cd zfs-2.4.1-qos
-./autogen.sh
-MAKE=gmake ./configure --with-config=kernel
-gmake -j2
-sudo cp module/openzfs.ko /boot/modules/openzfs.ko
-# /boot/loader.conf : openzfs_load="YES"
-sudo shutdown -r now
-```
-
-## Résultats S1 Solo (2026-04-19)
-
-| Protocole | Linux | FreeBSD |
-|-----------|-------|---------|
-| LOCAL     | 15P/0F | 15P/0F |
-| NFS       | 15P/0F | 15P/0F |
-| CIFS      | 15P/0F | 15P/0F |
-| iSCSI     | 15P/0F | 15P/0F |
-| NVMe-oF   | 15P/0F | 15P/0F |
-| **TOTAL** | **75P/0F** | **75P/0F** |
-
-**150/150 (100%)** — score parfait sur toute la matrice.
-
-## Tests autonomes
-
-```bash
-# Setup complet (reboot VMs + mount 5 protocoles × 2 VMs)
-bash scripts/full_setup.sh --reboot
-
-# Vérification cohérence (50 checks)
-bash scripts/verify_all.sh
-
-# Chain complète S1 (~5h)
-bash scripts/chain_full.sh --reboot
-
-# Chain S1+S2+S3 (~15h)
-bash scripts/chain_full.sh --reboot --s1s2s3
-```
+Ce qui reste ouvert est listé dans les
+[notes de version](RELEASE-NOTES-v2.3.md) : 26 limites connues, dont neuf ont un correctif prêt
+qui n'est pas dans cette version.
 
 ## Environnement de test
 
-| VM | OS | ZFS kmod |
-|----|----|----------|
-| zfs-qos | Ubuntu 24.04, kernel 6.8 | 2.4.1-1 QoS |
-| zfs-bsd-qos | FreeBSD 15.0-RELEASE-p5 | 2.4.1-1 QoS |
+| | Linux | FreeBSD |
+|---|---|---|
+| système | Ubuntu 24.04, noyau 6.8 | FreeBSD 15.0-RELEASE-p5 |
+| module | construit depuis ce dépôt | construit depuis ce dépôt |
+
+## Versions précédentes
+
+Les tags `v2.2` et `v2.1` restent dans l'historique (base OpenZFS 2.4.1). La v2.3 remplace le
+contenu de `scripts/` par le banc tel qu'il a servi, dans son arborescence, avec un modèle de
+fichier d'environnement (`scripts/0-setup/qos_env.sh.example`). Les documents
+`patch-2.4.1/specs-patches.md`, `DEPENDENCIES.md` et `TEST-PLAN.md` datent de la v1.0 : ils sont
+conservés tels quels ; pour la v2.3, lisez `DESIGN.md` et `TESTING.md`.

@@ -1,223 +1,159 @@
-# OpenZFS QoS — Guide d'utilisation
+# OpenZFS QoS v2.3 — Guide d'utilisation
 
-## Qu'est-ce que c'est ?
+## Ce que fait la QoS
 
-Un système de rate-limiting per-dataset intégré au kernel ZFS. Chaque dataset
-peut avoir ses propres limites de bande passante (MB/s) et d'IOPS, séparément
-en lecture et en écriture. Le throttling se fait au niveau ZIO (I/O layer),
-ce qui garantit que les limites sont respectées quel que soit le protocole
-d'accès (local, NFS, CIFS, iSCSI, NVMe-oF).
+Elle limite les entrées-sorties d'un dataset — système de fichiers ou volume — avec deux seaux
+à jetons, un pour les lectures et un pour les écritures, chacun avec un débit en octets par
+seconde et un débit en opérations par seconde.
 
-## Propriétés ZFS
+La limite est appliquée dans le module ZFS, sous tous les chemins d'accès : elle vaut de la
+même façon en local, en NFS, en CIFS, en iSCSI et en NVMe-oF, sur Linux comme sur FreeBSD.
+Les snapshots ne sont jamais limités.
 
-### Bande passante (bytes/seconde)
+## Les propriétés
 
-Les valeurs sont en **bytes bruts**. Les suffixes (`M`, `G`) ne fonctionnent pas —
-`zfs set` les accepte sans erreur mais le kernel ne parse que la partie numérique
-(ex: `100M` → le kernel voit 100 bytes/s, pas 100 MB/s).
+Ce sont des propriétés utilisateur : elles se posent avec `zfs set`, se lisent avec `zfs get`,
+suivent le pool à l'export et à l'import.
 
-```bash
-# Limiter la lecture à 100 MB/s (100 × 1048576 = 104857600)
-zfs set qos:max_bw_read=104857600 pool/dataset
+| propriété | valeur | défaut | effet |
+|---|---|---|---|
+| `qos:max_bw_read` | octets par seconde | 0 | débit maximal en lecture |
+| `qos:max_bw_write` | octets par seconde | 0 | débit maximal en écriture |
+| `qos:max_iops_read` | opérations par seconde | 0 | nombre maximal de lectures |
+| `qos:max_iops_write` | opérations par seconde | 0 | nombre maximal d'écritures |
+| `qos:enabled` | `on` ou `off` | — | `off` suspend les limites du dataset |
+| `qos:boost` | entier | 0 | emprunt de ce que les voisins laissent, jusqu'à N fois le débit propre |
+| `qos:boost_pool` | `1` ou `0` | 1 | `0` : ce dataset ne prête rien |
+| `qos:count_arc_hits` | `on` ou `off` | `on` | `off` : les lectures du dataset ne sont plus limitées du tout |
+| `qos:max_iosize` | octets | 0 | à ne pas utiliser (voir les notes de version, limite 9) |
 
-# Limiter l'écriture à 50 MB/s
-zfs set qos:max_bw_write=52428800 pool/dataset
+Un dataset est limité dès qu'un de ses quatre débits est supérieur à zéro et que `qos:enabled`
+ne vaut pas `off`.
 
-# Valeurs courantes :
-#   5 MB/s  =   5242880
-#  10 MB/s  =  10485760
-#  20 MB/s  =  20971520
-#  50 MB/s  =  52428800
-# 100 MB/s  = 104857600
-# 500 MB/s  = 524288000
-#   1 GB/s  = 1073741824
+```sh
+zfs set qos:max_bw_read=104857600 tank/client-001    # 100 Mio/s en lecture
+zfs set qos:max_bw_write=52428800 tank/client-001    # 50 Mio/s en écriture
+zfs set qos:max_iops_read=5000 tank/client-001
+zfs set qos:max_bw_read=0 tank/client-001            # plus de limite de lecture
+zfs set qos:enabled=off tank/client-001              # suspendre toutes ses limites
+zfs get all tank/client-001 | grep qos:
 ```
 
-### IOPS (opérations par seconde)
+**Les valeurs sont des entiers décimaux, sans suffixe.** Seuls les chiffres de tête sont lus :
+`100M` vaut 100 octets par seconde, pas 100 mégaoctets. `0` veut dire « pas de limite » ; une
+valeur au-dessus de 2^50 est ramenée à 2^50.
 
-```bash
-# Limiter les lectures à 5000 IOPS
-zfs set qos:max_iops_read=5000 pool/dataset
+| débit | valeur |
+|---|---|
+| 5 Mio/s | 5242880 |
+| 10 Mio/s | 10485760 |
+| 50 Mio/s | 52428800 |
+| 100 Mio/s | 104857600 |
+| 1 Gio/s | 1073741824 |
 
-# Limiter les écritures à 3000 IOPS
-zfs set qos:max_iops_write=3000 pool/dataset
-```
+**Ne limitez pas le dataset qui porte le système** : une lecture ralentie y retarde chaque
+programme qui démarre, y compris la session qui servirait à retirer la limite.
 
-### Taille I/O maximale
+## Ce qui est compté
 
-```bash
-# Limiter la taille des I/O à 128K (les I/O plus gros → EIO)
-zfs set qos:max_iosize=131072 pool/dataset
-```
+- **Lectures** de données de fichier ou de volume : le nombre d'octets demandés, que la donnée
+  vienne du cache ou du disque.
+- **Écritures** de données : la taille des données, comptée quand la transaction qui les porte
+  est acceptée.
+- **Opérations sur les métadonnées** (créer, renommer, supprimer un fichier, changer ses
+  droits) : l'espace que leur transaction réserve, soit 257 à 387 Kio chacune sur la limite
+  d'écriture, quoi qu'elles écrivent réellement. Sous 1 Mio/s, un dataset crée donc environ
+  quatre fichiers par seconde (une création est comptée 258 Kio).
+- **Opérations** : une par requête de lecture, une par transaction d'écriture, une par
+  synchronisation (`fsync`).
 
-### Boost (redistribution du surplus inutilisé)
+## Le seau, l'attente
 
-Le wake thread QoS fait deux passes toutes les ~1 ms :
-1. **Pass 1 (collecte)** — chaque dataset avec `qos:boost_pool=1` qui n'a pas
-   consommé tous ses tokens donne le surplus au pool commun.
-2. **Pass 2 (distribution)** — le surplus collecté est redistribué aux datasets
-   avec `qos:boost > 0`, proportionnellement à leur facteur.
+Un seau contient au plus deux secondes de son débit. Un dataset qui n'a rien fait depuis un
+moment peut donc passer d'un coup deux secondes de débit avant d'être ralenti : sur une minute,
+il obtient 1,03 fois sa limite.
 
-Deux propriétés :
+Une requête plus grande que le seau passe dès que le seau n'est pas en dette, et elle est
+comptée en entier : les suivantes attendent que la dette soit remboursée. Le débit moyen reste
+le débit configuré.
 
-- **`qos:boost`** — facteur d'emprunt (entier). `0` = n'emprunte pas de surplus,
-  `3` = peut stocker et consommer jusqu'à 3× son rate en tokens boost.
-  Ce n'est pas un multiplicateur de débit instantané mais un cap de stockage :
-  `boost_tokens_max = boost_factor × rate`. Le dataset puise dans ses tokens
-  boost uniquement quand ses tokens normaux sont épuisés.
-- **`qos:boost_pool`** — boolean (`0` ou `1`, défaut `1`). Contrôle si ce
-  dataset **donne** ses tokens inutilisés au surplus pool. Un dataset peut
-  donner (`boost_pool=1`) sans emprunter (`boost=0`), ou emprunter sans donner.
+Une écriture ralentie attend ses jetons sans limite de temps. Une lecture ralentie attend au
+plus `zfs_qos_read_timeout_ms` (10 secondes par défaut), puis passe sans être comptée : sous
+une très forte contention la limite de lecture d'un dataset peut donc être dépassée.
 
-```bash
-# Ce dataset peut emprunter le surplus des autres (facteur ×3)
-zfs set qos:boost=3 pool/dataset
+## Le boost
 
-# Ce dataset ne donne PAS ses tokens inutilisés aux autres
-zfs set qos:boost_pool=0 pool/dataset
-```
+`qos:boost=N` autorise un dataset à dépasser son débit en prenant sur **ce que les autres
+datasets limités du même pool n'utilisent pas** de leur propre limite, jusqu'à N fois son
+débit en plus du sien. Son plafond devient débit × (1 + N).
 
-### Comptage ARC hits
+- Ce qui est prêté en lecture sert aux lectures, ce qui est prêté en écriture sert aux
+  écritures.
+- Le boost redistribue, il n'ajoute rien : en régime établi, le total servi ne dépasse pas la
+  somme des limites posées dans le pool. Au début d'un emprunt, ce que les voisins n'ont pas
+  utilisé pendant les dix dernières secondes au plus peut être servi en plus.
+- Un voisin sans limite ne prête rien. Un dataset qui est le seul limité de son pool ne gagne
+  presque rien.
+- Un voisin qui se remet à travailler reprend sa part : le boost dure tant qu'il reste de quoi
+  prêter.
+- Quand plusieurs datasets boostés se partagent un prêt insuffisant, la part de chacun a été
+  mesurée proportionnelle à sa limite (une mesure, Linux, écriture séquentielle).
+- `qos:boost_pool=0` sur un dataset : il ne prête pas ce qu'il laisse.
 
-Par défaut, les lectures servies depuis l'ARC (cache mémoire) sont comptées
-dans le throttle. Désactiver pour ne throttler que les lectures disk :
-
-```bash
-zfs set qos:count_arc_hits=off pool/dataset
-```
-
-### Désactiver / hériter
-
-```bash
-# Désactiver une limite (0 = pas de limite)
-zfs set qos:max_bw_read=0 pool/dataset
-
-# Hériter de la valeur du parent
-zfs inherit qos:max_bw_read pool/dataset
-
-# Voir toutes les propriétés QoS
-zfs get all pool/dataset | grep qos
-```
-
-## Récapitulatif des propriétés
-
-| Propriété | Type | Unité | Défaut | Description |
-|-----------|------|-------|--------|-------------|
-| `qos:max_bw_read` | uint64 | bytes/s | 0 (off) | Cap bande passante lecture |
-| `qos:max_bw_write` | uint64 | bytes/s | 0 (off) | Cap bande passante écriture |
-| `qos:max_iops_read` | uint64 | ops/s | 0 (off) | Cap IOPS lecture |
-| `qos:max_iops_write` | uint64 | ops/s | 0 (off) | Cap IOPS écriture |
-| `qos:max_iosize` | uint64 | bytes | 0 (off) | Taille I/O max (EIO si dépassé) |
-| `qos:boost` | uint32 | facteur | 0 (off) | Multiplicateur boost (ex: 3 = peut consommer 3× cap) |
-| `qos:boost_pool` | uint32 | 0/1 | 1 | Contribue au surplus pool (donneur) |
-| `qos:count_arc_hits` | string | on/off | on | Compter les lectures ARC (cache hits) dans le throttle |
-
-## Monitoring — kstats
-
-Chaque dataset avec QoS actif expose des statistiques en temps réel :
-
-### Linux
-
-```bash
-# Lister les kstats QoS
-ls /proc/spl/kstat/zfs/testqos/ | grep qos
-
-# Lire les stats d'un dataset
-cat /proc/spl/kstat/zfs/testqos/qos-0x<objid>
-```
-
-### FreeBSD
-
-```bash
-sysctl kstat.zfs.testqos | grep qos
-```
-
-### Champs kstats (28 par dataset)
-
-**Configuration :**
-- `config_iops_rate_read/write` — caps IOPS configurés
-- `config_bw_rate_read/write` — caps BW configurés
-- `config_io_size_max` — taille I/O max
-
-**Compteurs :**
-- `stat_total_ios_read/write` — nombre total d'I/O depuis l'activation
-- `stat_total_bytes_read/write` — volume total transféré
-- `stat_throttled_ios_read/write` — nombre d'I/O retardés par le throttle
-- `stat_rejected_ios` — nombre d'I/O rejetés (taille > max_iosize)
-
-**Tokens (état instantané) :**
-- `tokens_bw_read/write` — tokens BW disponibles
-- `tokens_iops_read/write` — tokens IOPS disponibles
-
-**Boost :**
-- `boost_surplus_available` — surplus pool disponible
-- `boost_consumed` — surplus consommé par ce dataset
-
-## Exemples d'usage
-
-### Multi-tenant — isolation par client
-
-```bash
-# Client A : 100 MB/s read, 50 MB/s write
-zfs set qos:max_bw_read=104857600 tank/clients/clientA
-zfs set qos:max_bw_write=52428800 tank/clients/clientA
-
-# Client B : 200 MB/s read, 100 MB/s write
-zfs set qos:max_bw_read=209715200 tank/clients/clientB
-zfs set qos:max_bw_write=104857600 tank/clients/clientB
-
-# Client C : pas de limite (service premium)
-# (ne rien set, ou qos:max_bw_read=0)
-```
-
-### Stockage partagé NFS — protéger les VMs
-
-```bash
-# VMs de production : 500 MB/s
-zfs set qos:max_bw_read=524288000 tank/vms/prod
-zfs set qos:max_bw_write=524288000 tank/vms/prod
-
-# Backups : 50 MB/s (ne pas impacter la prod)
-zfs set qos:max_bw_read=52428800 tank/backups
-zfs set qos:max_bw_write=52428800 tank/backups
-```
-
-### iSCSI — caps IOPS pour base de données
-
-```bash
-# Dataset zvol pour PostgreSQL : limiter les IOPS
-zfs set qos:max_iops_read=10000 tank/iscsi/pg-data
-zfs set qos:max_iops_write=5000 tank/iscsi/pg-data
-```
-
-### Boost — utiliser la bande passante inutilisée
-
-```bash
-# 5 datasets à 20 MB/s chacun, boost ×4
+```sh
+# cinq clients à 20 Mio/s ; client-1 peut monter à 100 Mio/s quand les autres sont au repos
 for i in 1 2 3 4 5; do
-  zfs set qos:max_bw_read=20971520 tank/bench$i    # 20 MB/s
-  zfs set qos:max_bw_write=20971520 tank/bench$i
-  zfs set qos:boost=4 tank/bench$i       # peut consommer 4× sa cap via surplus
-  zfs set qos:boost_pool=1 tank/bench$i  # contribue au surplus (défaut)
+    zfs set qos:max_bw_read=20971520 qos:max_bw_write=20971520 tank/client-$i
 done
-
-# Si seul bench1 est actif, il peut consommer le surplus
-# des 4 autres pour atteindre ~80 MB/s (4 × 20)
+zfs set qos:boost=4 tank/client-1
 ```
 
-## Portabilité
+## Héritage
 
-Le QoS fonctionne de manière identique sur Linux et FreeBSD. Aucune
-configuration OS-specific n'est nécessaire. Les propriétés `qos:*` sont
-stockées dans les métadonnées ZFS et sont donc persistantes et portables
-(un pool exporté d'un Linux et importé sur un FreeBSD conserve ses caps).
+Chaque dataset a ses propres seaux. Un dataset qui hérite un débit de son parent est limité
+pour lui-même, à la même valeur : un parent et ses enfants ne se partagent pas une limite.
 
-## Limitations connues
+Les propriétés sont lues quand le dataset est chargé (import du pool, création, montage) et
+chaque fois que l'une d'elles est posée ou héritée **sur ce dataset**. Un changement fait sur
+un parent n'atteint pas les enfants déjà montés : ils gardent leurs valeurs jusqu'à leur
+prochain montage.
 
-- **Pas de suffixes** : `zfs set qos:max_bw_read=100M` stocke la string `100M` mais
-  le kernel parse uniquement `100` (bytes/s). Toujours utiliser la valeur en bytes bruts.
-- **Jamais sur le dataset racine** : `qos:max_bw_read/write` sur `/` throttle `execve()`
-  et bloque `sshd` — ne jamais mettre de caps sur le dataset racine du pool système.
-- **FreeBSD O_DIRECT** : ignoré par ZFS → les lectures "directes" passent par l'ARC,
-  ce qui donne des débits uncapped plus élevés qu'en Linux.
-- **kstats per-dataset** : un zvol avec plusieurs partitions partage un seul bucket QoS.
+## Les compteurs
+
+Un dataset limité publie ses réglages et ses compteurs, sous le nom `qos-0x<id>` où `<id>` est
+son `objsetid` en hexadécimal :
+
+```sh
+zfs get -H -o value objsetid tank/client-001          # par exemple 134 → 0x86
+
+# Linux
+cat /proc/spl/kstat/zfs/tank/qos-0x86
+# FreeBSD
+sysctl kstat.zfs.tank.qos.qos-0x86
+```
+
+| compteur | sens |
+|---|---|
+| `config_bw_rate_read`, `config_bw_rate_write`, `config_iops_rate_read`, `config_iops_rate_write` | les débits réellement appliqués par le noyau |
+| `stat_total_bytes_read`, `stat_total_bytes_write` | octets comptés sur chaque limite |
+| `stat_total_ios_read`, `stat_total_ios_write` | opérations comptées |
+| `stat_throttle_count_read`, `stat_throttle_count_write` | nombre de requêtes qui ont dû attendre |
+| `stat_throttle_ns_read`, `stat_throttle_ns_write` | temps total d'attente, en nanosecondes |
+| `stat_bw_tokens_read`, `stat_bw_tokens_write`, `stat_iops_tokens_read`, `stat_iops_tokens_write` | jetons présents dans les seaux |
+| `boost_factor`, `boost_bw_tokens_read`, `boost_bw_tokens_write` | le boost et les jetons empruntés en attente |
+| `stat_rejected_size` | requêtes plus grandes que `qos:max_iosize` |
+
+Les compteurs d'un volume n'existent que tant que le volume est ouvert : ils repartent de zéro
+à chaque ouverture.
+
+Le thread qui redistribue le boost publie les siens dans `qos-boost-wake`
+(`/proc/spl/kstat/zfs/qos-boost-wake` sur Linux, `kstat.zfs.misc.qos-boost-wake` sur FreeBSD).
+
+## Paramètres du module
+
+Sous `/sys/module/zfs/parameters/` sur Linux, `vfs.zfs.` sur FreeBSD (sans le préfixe `zfs_`).
+
+| paramètre | défaut | effet |
+|---|---|---|
+| `zfs_qos_read_timeout_ms` | 10000 | attente maximale d'une lecture ou d'une synchronisation ralentie ; minimum 100. Pour des clients NFS montés en `soft`, le régler sous leur `timeo` |
+| `zfs_qos_debug` | 0 | `1` : compteurs et messages de diagnostic supplémentaires |

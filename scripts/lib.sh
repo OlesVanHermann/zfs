@@ -49,7 +49,13 @@ scenario() {
 qos_set() {
     local ds=$1 bw_mb=$2 iops=$3 boost=${4:-0} pool=${5:-1}
     local bw_b=$((bw_mb * 1048576))
-    $SSH "sudo zfs set qos:max_bw_read=$bw_b qos:max_bw_write=$bw_b qos:max_iops_read=$iops qos:max_iops_write=$iops qos:boost=$boost qos:boost_pool=$pool $ds" 2>/dev/null
+    # qos:enabled=on obligatoire : seuls bench1-4 l'ont en canonique. Sans lui,
+    # les datasets OVERRIDE (iscsi*/nvme*) ignorent les caps — S1/S2 iSCSI et
+    # NVMe-oF des chaînes v2 mesuraient du débit libre (découvert 2026-07-11).
+    # qos:count_arc_hits=on aussi : un `off` résiduel (state sale d'une session
+    # antérieure) neutralise TOUT le gate read → reads débridés, writes cappés
+    # (incident bench2 2026-07-11, off posé à 08:35 par un test ad-hoc).
+    $SSH "sudo zfs set qos:enabled=on qos:count_arc_hits=on qos:max_bw_read=$bw_b qos:max_bw_write=$bw_b qos:max_iops_read=$iops qos:max_iops_write=$iops qos:boost=$boost qos:boost_pool=$pool $ds" 2>/dev/null
 }
 
 qos_unset() {
@@ -233,9 +239,11 @@ ensure_iscsi_mount_order() {
         [[ "$h" == "$host_id" ]] && lun_to_dev[$lun]=$dev
     done
 
+    # Convention identité : mount /i ↔ LUN i ↔ zvol iscsiI (targets LNX et BSD
+    # alignés le 2026-07-06 — l'ancien mapping décalé i-1 datait des 5 zvols).
     local needs_fix=0
     for ((i=1; i<=count; i++)); do
-        local expected_lun=$((i - 1))
+        local expected_lun=$i
         local expected_dev="${lun_to_dev[$expected_lun]}"
         local current_dev
         current_dev=$(mount | grep "$base_path/$i " | awk '{print $1}')
@@ -248,7 +256,7 @@ ensure_iscsi_mount_order() {
     if [[ $needs_fix -eq 0 ]]; then
         log "  ${GRN}OK${RST} iSCSI mount order verified for $base_path (host=$host_id)"
         for ((i=1; i<=count; i++)); do
-            local lun=$((i - 1))
+            local lun=$i
             log "    LUN $lun (${lun_to_dev[$lun]}) → $base_path/$i"
         done
         return 0
@@ -260,7 +268,7 @@ ensure_iscsi_mount_order() {
     done
 
     for ((i=1; i<=count; i++)); do
-        local lun=$((i - 1))
+        local lun=$i
         local dev="${lun_to_dev[$lun]}"
         if [[ -n "$dev" ]]; then
             sudo mkdir -p "$base_path/$i"

@@ -1,0 +1,66 @@
+2026-11-22T03:35:08Z campaign start bench=/home/ubuntu/qos-tests out=results/v2.3/zfs-2.4.1 runtime=60 scenarios="s0 s1 s2 s3" units="local:lnx local:bsd"
+2026-11-22T03:35:11Z unit=local:lnx verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T03:40:19Z unit=local:lnx scenario=s0 rc=0 rows=1/1 seconds=307.05 fio_logs=5 run_ms=60001..60001 mixed_errors=0
+2026-11-22T03:50:37Z unit=local:lnx scenario=s1 rc=0 rows=2/2 seconds=617.06 fio_logs=10 run_ms=60001..60195 mixed_errors=0
+2026-11-22T04:31:14Z unit=local:lnx scenario=s2 rc=0 rows=8/8 seconds=2436.24 fio_logs=10 run_ms=60001..60024 mixed_errors=0
+2026-11-22T04:46:37Z unit=local:lnx scenario=s3 rc=0 rows=6/6 seconds=922.91 fio_logs=10 run_ms=60001..60046 mixed_errors=0
+2026-11-22T04:46:38Z unit=local:lnx COMPLETE
+2026-11-22T04:46:41Z unit=local:bsd verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T04:51:50Z unit=local:bsd scenario=s0 rc=0 rows=1/1 seconds=308.58 fio_logs=5 run_ms=60001..60001 mixed_errors=0
+2026-11-22T05:02:09Z unit=local:bsd scenario=s1 rc=0 rows=2/2 seconds=618.51 fio_logs=10 run_ms=60006..60133 mixed_errors=0
+2026-11-22T05:42:59Z unit=local:bsd scenario=s2 rc=0 rows=8/8 seconds=2449.26 fio_logs=10 run_ms=60001..60036 mixed_errors=0
+2026-11-22T05:58:24Z unit=local:bsd scenario=s3 rc=0 rows=6/6 seconds=924.35 fio_logs=10 run_ms=60001..60024 mixed_errors=0
+2026-11-22T05:58:25Z unit=local:bsd COMPLETE
+2026-11-22T05:58:25Z RESULT=COMPLETE units=2 seconds=8596.30
+2026-11-22T05:58:38Z campaign start bench=/home/ubuntu/qos-tests out=results/v2.3/zfs-2.4.1 runtime=60 scenarios="s0 s1 s2 s3" units="nfs:lnx nfs:bsd cifs:lnx cifs:bsd"
+2026-11-22T05:58:41Z unit=nfs:lnx verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T06:04:02Z unit=nfs:lnx scenario=s0 rc=0 rows=1/1 seconds=320.34 fio_logs=5 run_ms=60001..60001 mixed_errors=0
+2026-11-22T06:14:24Z unit=nfs:lnx scenario=s1 rc=0 rows=2/2 seconds=622.52 fio_logs=10 run_ms=60001..60130 mixed_errors=0
+2026-11-22T06:55:28Z unit=nfs:lnx scenario=s2 rc=0 rows=8/8 seconds=2463.21 fio_logs=10 run_ms=60001..60019 mixed_errors=0
+2026-11-22T07:10:55Z unit=nfs:lnx scenario=s3 rc=0 rows=6/6 seconds=927.03 fio_logs=10 run_ms=60001..60025 mixed_errors=0
+2026-11-22T07:10:55Z unit=nfs:lnx COMPLETE
+2026-11-22T07:10:58Z unit=nfs:bsd verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T07:16:05Z unit=nfs:bsd scenario=s0 rc=0 rows=1/1 seconds=306.75 fio_logs=5 run_ms=60001..60004 mixed_errors=0
+2026-11-22T07:26:27Z unit=nfs:bsd scenario=s1 rc=0 rows=2/2 seconds=621.56 fio_logs=10 run_ms=60001..60198 mixed_errors=0
+2026-11-22T08:07:17Z unit=nfs:bsd scenario=s2 rc=0 rows=8/8 seconds=2449.92 fio_logs=10 run_ms=60001..60022 mixed_errors=0
+2026-11-22T08:22:36Z unit=nfs:bsd scenario=s3 rc=0 rows=6/6 seconds=919.43 fio_logs=10 run_ms=60001..60030 mixed_errors=0
+2026-11-22T08:22:36Z unit=nfs:bsd COMPLETE
+2026-11-22T08:22:40Z unit=cifs:lnx verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T08:22:40Z unit=cifs:lnx scenario=s0 NO_SCRIPT (not measured for this protocol)
+2026-11-22T08:33:04Z unit=cifs:lnx scenario=s1 rc=0 rows=2/2 seconds=624.35 fio_logs=10 run_ms=60001..60148 mixed_errors=0
+2026-11-22T09:13:52Z unit=cifs:lnx scenario=s2 rc=0 rows=8/8 seconds=2447.98 fio_logs=10 run_ms=60001..60036 mixed_errors=0
+2026-11-22T09:29:18Z unit=cifs:lnx scenario=s3 rc=0 rows=6/6 seconds=925.87 fio_logs=10 run_ms=60001..60017 mixed_errors=0
+2026-11-22T09:29:19Z unit=cifs:lnx COMPLETE
+2026-11-22T09:29:22Z unit=cifs:bsd verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T09:29:22Z unit=cifs:bsd scenario=s0 NO_SCRIPT (not measured for this protocol)
+2026-11-22T09:39:40Z unit=cifs:bsd scenario=s1 rc=0 rows=2/2 seconds=618.11 fio_logs=10 run_ms=60001..60163 mixed_errors=0
+2026-11-22T10:20:23Z unit=cifs:bsd scenario=s2 rc=0 rows=8/8 seconds=2442.31 fio_logs=10 run_ms=60001..60029 mixed_errors=0
+2026-11-22T10:35:44Z unit=cifs:bsd scenario=s3 rc=0 rows=6/6 seconds=921.05 fio_logs=10 run_ms=60001..60027 mixed_errors=0
+2026-11-22T10:35:44Z unit=cifs:bsd COMPLETE
+2026-11-22T10:35:44Z RESULT=COMPLETE units=4 seconds=16626.37
+2026-11-22T10:35:58Z campaign start bench=/home/ubuntu/qos-tests out=results/v2.3/zfs-2.4.1 runtime=60 scenarios="s0 s1 s2 s3" units="iscsi:lnx iscsi:bsd nvmeof:lnx nvmeof:bsd"
+2026-11-22T10:36:01Z unit=iscsi:lnx verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T10:36:01Z unit=iscsi:lnx scenario=s0 NO_SCRIPT (not measured for this protocol)
+2026-11-22T10:46:26Z unit=iscsi:lnx scenario=s1 rc=0 rows=2/2 seconds=624.16 fio_logs=10 run_ms=60001..60315 mixed_errors=0
+2026-11-22T11:27:35Z unit=iscsi:lnx scenario=s2 rc=0 rows=8/8 seconds=2469.42 fio_logs=10 run_ms=60001..60028 mixed_errors=0
+2026-11-22T11:43:12Z unit=iscsi:lnx scenario=s3 rc=0 rows=6/6 seconds=936.55 fio_logs=10 run_ms=60001..60032 mixed_errors=0
+2026-11-22T11:43:12Z unit=iscsi:lnx COMPLETE
+2026-11-22T11:43:15Z unit=iscsi:bsd verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T11:43:15Z unit=iscsi:bsd scenario=s0 NO_SCRIPT (not measured for this protocol)
+2026-11-22T11:53:43Z unit=iscsi:bsd scenario=s1 rc=0 rows=2/2 seconds=627.32 fio_logs=10 run_ms=60002..62408 mixed_errors=0
+2026-11-22T12:34:49Z unit=iscsi:bsd scenario=s2 rc=0 rows=8/8 seconds=2466.29 fio_logs=10 run_ms=60001..60036 mixed_errors=0
+2026-11-22T12:50:20Z unit=iscsi:bsd scenario=s3 rc=0 rows=6/6 seconds=930.55 fio_logs=10 run_ms=60001..60484 mixed_errors=0
+2026-11-22T12:50:20Z unit=iscsi:bsd COMPLETE
+2026-11-22T12:50:23Z unit=nvmeof:lnx verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T12:55:34Z unit=nvmeof:lnx scenario=s0 rc=0 rows=1/1 seconds=310.62 fio_logs=5 run_ms=60001..60002 mixed_errors=0
+2026-11-22T13:05:58Z unit=nvmeof:lnx scenario=s1 rc=0 rows=2/2 seconds=623.13 fio_logs=10 run_ms=60001..60091 mixed_errors=0
+2026-11-22T13:47:03Z unit=nvmeof:lnx scenario=s2 rc=0 rows=8/8 seconds=2465.44 fio_logs=10 run_ms=60001..60086 mixed_errors=0
+2026-11-22T14:02:33Z unit=nvmeof:lnx scenario=s3 rc=0 rows=6/6 seconds=930.02 fio_logs=10 run_ms=60001..60282 mixed_errors=0
+2026-11-22T14:02:34Z unit=nvmeof:lnx COMPLETE
+2026-11-22T14:02:37Z unit=nvmeof:bsd verify rc=0 48 PASS / 0 FAIL / 0 WARN
+2026-11-22T14:07:50Z unit=nvmeof:bsd scenario=s0 rc=0 rows=1/1 seconds=312.13 fio_logs=5 run_ms=60001..60001 mixed_errors=0
+2026-11-22T14:18:12Z unit=nvmeof:bsd scenario=s1 rc=0 rows=2/2 seconds=621.92 fio_logs=10 run_ms=60001..60195 mixed_errors=0
+2026-11-22T14:59:17Z unit=nvmeof:bsd scenario=s2 rc=0 rows=8/8 seconds=2465.09 fio_logs=10 run_ms=60001..60145 mixed_errors=0
+2026-11-22T15:14:40Z unit=nvmeof:bsd scenario=s3 rc=0 rows=6/6 seconds=923.25 fio_logs=10 run_ms=60001..60041 mixed_errors=0
+2026-11-22T15:14:41Z unit=nvmeof:bsd COMPLETE
+2026-11-22T15:14:41Z RESULT=COMPLETE units=4 seconds=16722.65

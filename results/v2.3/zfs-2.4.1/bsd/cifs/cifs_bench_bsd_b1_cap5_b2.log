@@ -1,0 +1,7 @@
+  === MOUNT=/mnt/bsd/cifs/1 (runtime=60s size=192M) ===
+  seq_write   :     16.04 MB/s  (raw: 15.3MiB/s)
+  seq_read    :     16.04 MB/s  (raw: 15.3MiB/s)
+  rand_write  :     12.27 MB/s  (raw: 11.7MiB/s)
+  rand_read   :     16.04 MB/s  (raw: 15.3MiB/s)
+  readwrite_R :     14.78 MB/s  (raw: 14.1MiB/s)
+  readwrite_W :     15.73 MB/s  (raw: 15.0MiB/s)

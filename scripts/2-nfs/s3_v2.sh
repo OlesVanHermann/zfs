@@ -28,7 +28,7 @@ fi
 # Reset + seed read files sur les 5 datasets (QoS off)
 nfs_reset_all
 log "Seeding bench_r sur les 5 datasets..."
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4; do
     seed_read_file "${NFS_MNT[$i]}"
 done
 
@@ -56,11 +56,20 @@ run_parallel_axis_s3() {
     # Calcul sum_caps pour les N datasets actifs
     local sum_caps=0
     for i in $(seq 1 $N); do sum_caps=$((sum_caps + ${CAPS_BW[$i]})); done
-    local pool_bw
-    case "$axis" in
-        a|b) pool_bw=${POOL_BW_READ:-999} ;;
-        c)   pool_bw=${POOL_BW_WRITE:-999} ;;
-    esac
+
+    # AQ-patch36: agrégation OBSERVÉE post-wait (axes a|b|c). Unifie s3 sur la
+    # même primitive que s2 (assert_within_adaptive). Remplace la logique inline
+    # `overloaded = sum_caps > 0.7 × pool_bw_preflight` qui était insensible à
+    # la saturation réelle observée sous parallélisme.
+    local sum_measured=0
+    if [[ "$axis" == "a" || "$axis" == "b" || "$axis" == "c" ]]; then
+        for i in $(seq 1 $N); do
+            local mi
+            mi=$(cat "${outs[$i]}" 2>/dev/null)
+            mi=${mi:-0.0}
+            sum_measured=$(awk -v a=$sum_measured -v b=$mi 'BEGIN{printf "%.1f", a+b}')
+        done
+    fi
 
     for i in $(seq 1 $N); do
         out="${outs[$i]}"
@@ -81,14 +90,11 @@ run_parallel_axis_s3() {
             m=${m:-0.0}
             local ratio=$(awk -v m=$m -v c=$cap 'BEGIN{ printf "%.2f", m/c }')
             log "  ds${i} cap=${cap} boost=${B} max_theory=${theory_max} : ${m} MB/s  (boost_observed=${ratio}x)"
-            # Adaptive : si sum_caps > 0.7×pool_bw, utilise floor proportionnel
-            local overloaded=$(awk -v s=$sum_caps -v p=$pool_bw 'BEGIN{print (s > 0.7*p) ? "1" : "0"}')
-            if [[ "$overloaded" == "1" ]]; then
-                local expected=$(awk -v c=$cap -v s=$sum_caps -v p=$pool_bw 'BEGIN{printf "%.1f", (c/s)*p}')
-                assert_lower "$m" "$expected" 25 "S3.B${B}.N${N}.${axis}.ds${i}"
-            else
-                assert_lower "$m" "$cap" 25 "S3.B${B}.N${N}.${axis}.ds${i}"
-            fi
+            # AQ-patch36: saturation détectée par sum_measured/sum_caps (pas par
+            # sum_caps/pool_bw_preflight). Utilise assert_lower_adaptive (FLOOR-only)
+            # car sous boost actif measured peut légitimement dépasser cap.
+            # Tolérance non-saturée = 25 (S3 strict).
+            assert_lower_adaptive "$m" "$cap" 25 "S3.B${B}.N${N}.${axis}.ds${i}" "$sum_caps" "$sum_measured"
             local over=$(awk -v m=$m -v t=$theory_max 'BEGIN{ print (m > t*1.3) ? "1" : "0" }')
             if [[ "$over" == "1" ]]; then
                 log "    ${YEL}NOTE${RST} measured=${m} > theory_max=${theory_max} × 1.3 (cap inflaté ?)"
@@ -107,7 +113,7 @@ for B in 1 2 5 10; do
     log "═══════════════ S3 boost=${B} ═══════════════"
 
     # Applique caps + boost=B sur les 5 datasets (boost_pool=1)
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4; do
         qos_set "${NFS_DS[$i]}" "${CAPS_BW[$i]}" 0 "$B" 1
     done
 
